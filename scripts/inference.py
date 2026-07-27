@@ -148,6 +148,7 @@ def read_cadence_meta(h5_path: Path) -> dict:
     source = source.strip().replace(' ', '_')
 
     fch1 = float(attrs.get('fch1', 0.0))
+    foff = float(attrs.get('foff', 0.0))
 
     tstart_mjd = float(attrs.get('tstart', 0.0))
     if tstart_mjd > 0:
@@ -157,7 +158,7 @@ def read_cadence_meta(h5_path: Path) -> dict:
     else:
         date_str = "nodate"
 
-    return {"source": source, "fch1_mhz": fch1, "date": date_str}
+    return {"source": source, "fch1_mhz": fch1, "foff_mhz": foff, "date": date_str}
 
 
 def make_cadence_dirname(cad_idx: int, meta: dict) -> str:
@@ -259,6 +260,14 @@ def main():
             print(f"\nCadence {cad_idx}: SKIPPING — all files corrupt")
             continue
         target_name = meta["source"]
+        fch1_mhz = meta["fch1_mhz"]
+        # Header's own signed foff (Hz/channel) gets the direction of the
+        # frequency axis right; the config df is an unsigned magnitude and
+        # falls back to it only if the header didn't carry foff. Used to turn
+        # channel-index f_start values into real absolute sky frequencies
+        # (fch1_mhz + f_start * freq_step_hz), not just in-file offsets.
+        foff_hz = meta["foff_mhz"] * 1e6
+        freq_step_hz = foff_hz if foff_hz else df
         cad_dirname = make_cadence_dirname(cad_idx, meta)
         cad_dir = args.out_dir / cad_dirname
         cad_dir.mkdir(parents=True, exist_ok=True)
@@ -339,7 +348,7 @@ def main():
                             "cadence_idx": cad_idx,
                             "target": target_name,
                             "f_start": batch_fstarts[j],
-                            "f_center_mhz": batch_fstarts[j] * df / 1e6,
+                            "f_center_mhz": fch1_mhz + batch_fstarts[j] * freq_step_hz / 1e6,
                         }
                         for m in methods:
                             score = float(batch_scores[m][j])
@@ -400,7 +409,8 @@ def main():
             # Frequency-adjacency dedup (src/search/candidates.py): a single
             # wide/strong line triggers many adjacent overlapping windows
             # (stride < fchans) — collapse those into one candidate per event.
-            clusters = cluster_candidates(cad_fstarts_arr, scores, far_thresh, stride, fchans, df)
+            clusters = cluster_candidates(cad_fstarts_arr, scores, far_thresh, stride, fchans,
+                                           freq_step_hz, fch1_mhz=fch1_mhz)
             print(f"  {method}: {len(clusters)} distinct candidates after "
                   f"frequency-adjacency dedup (from {n_far} raw threshold-crossings)")
 
@@ -577,7 +587,7 @@ def main():
                     reconstruction=recon,
                     score=score, sigma=sigma, method=method,
                     cad_idx=cad_idx, target=target_name,
-                    f_start=fs, df=df,
+                    f_start=fs, df=freq_step_hz, fch1_mhz=fch1_mhz,
                     anomaly_map=amap,
                 )
                 if pdf is not None:

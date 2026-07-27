@@ -105,6 +105,19 @@ def main():
         f_start = args.f_start
         target = args.target
 
+    # Real header fch1/foff — f_start alone is a channel index, not a
+    # frequency; without fch1 the label is just an in-file offset (~100 MHz
+    # for a mid-file window), not a real sky frequency (see plot_candidate).
+    fch1_mhz, foff_hz = 0.0, 0.0
+    for obs_path in obs_paths:
+        try:
+            meta = inf.read_cadence_meta(obs_path)
+            fch1_mhz = meta["fch1_mhz"]
+            foff_hz = meta["foff_mhz"] * 1e6
+            break
+        except OSError:
+            continue
+
     with open(args.data_config) as f:
         data_cfg = yaml.safe_load(f)
     preproc = data_cfg["preprocessing"]
@@ -112,6 +125,7 @@ def main():
     fchans, tchans = frame["fchans"], frame["tchans"]
     downsample_factor = frame.get("downsample_factor", 1)
     df = data_cfg["raw"]["df"]
+    freq_step_hz = foff_hz if foff_hz else df
     method = preproc.get("bandpass_method", "polynomial")
     poly_degree = preproc.get("poly_degree", 3)
     mad_epsilon = preproc.get("mad_epsilon", 1e-6)
@@ -125,7 +139,9 @@ def main():
     raw = np.concatenate(raw_frames, axis=0)[:tchans, :]
     snippet = np.concatenate(normed_frames, axis=0)[:tchans, :]
 
-    f_center_mhz = f_start * df / 1e6
+    f_center_mhz = fch1_mhz + (f_start + fchans / 2) * freq_step_hz / 1e6
+    bw_hz = abs(freq_step_hz) * fchans
+    bw_label = f"{bw_hz / 1e3:.3f} kHz" if bw_hz < 1e6 else f"{bw_hz / 1e6:.4f} MHz"
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     for ax, arr, title in zip(axes, [raw, snippet], ["Raw power", "Preprocessed"]):
         vmin, vmax = np.percentile(arr, [1, 99])
@@ -136,7 +152,8 @@ def main():
         plt.colorbar(im, ax=ax, fraction=0.046)
     fig.suptitle(
         f"cad={args.cad_idx if args.cad_idx is not None else '-'} ({target})  "
-        f"f_start={f_start}  f~{f_center_mhz:.4f} MHz",
+        f"f_start={f_start} (channel)\n"
+        f"Center freq={f_center_mhz:.6f} MHz  Bandwidth={bw_label}",
         fontsize=11,
     )
     plt.tight_layout()

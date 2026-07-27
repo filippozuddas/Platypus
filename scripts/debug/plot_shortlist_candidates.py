@@ -122,6 +122,21 @@ def main():
     lines = [line.split() for line in args.cadence_list.read_text().splitlines() if line.strip()]
     obs_paths = [Path(p) for p in lines[cad_idx]]
 
+    # Real header fch1/foff, not the dir-name-parsed fch1 (rounded to 1 decimal
+    # and stripped of sign) — needed so f_center_mhz below is an absolute sky
+    # frequency, not just an in-file channel offset (see plot_candidate).
+    fch1_mhz, foff_hz = 0.0, 0.0
+    for obs_path in obs_paths:
+        try:
+            meta = inf.read_cadence_meta(obs_path)
+            fch1_mhz = meta["fch1_mhz"]
+            foff_hz = meta["foff_mhz"] * 1e6
+            if target is None:
+                target = meta["source"]
+            break
+        except OSError:
+            continue
+
     with open(args.candidates_csv, newline="") as f:
         rows = list(csv.DictReader(f))
     if not rows:
@@ -146,6 +161,7 @@ def main():
     fchans, tchans = frame["fchans"], frame["tchans"]
     downsample_factor = frame.get("downsample_factor", 1)
     df = data_cfg["raw"]["df"]
+    freq_step_hz = foff_hz if foff_hz else df
     method_bp = preproc.get("bandpass_method", "polynomial")
     poly_degree = preproc.get("poly_degree", 3)
     mad_epsilon = preproc.get("mad_epsilon", 1e-6)
@@ -206,7 +222,7 @@ def main():
         fs = int(float(row["f_start_peak"]))
         score = float(row["peak_score"])
         snippet = extract_at(fs)
-        f_center_mhz = fs * df / 1e6
+        f_center_mhz = fch1_mhz + (fs + fchans / 2) * freq_step_hz / 1e6
 
         amap = get_cached_amap(fs)
         recon = None
@@ -222,7 +238,8 @@ def main():
             fig = plot_candidate(
                 original=snippet, reconstruction=recon, score=score, sigma=None,
                 method=method, cad_idx=cad_idx, target=target or "unknown",
-                f_start=fs, df=df, anomaly_map=amap, show_overlay=False,
+                f_start=fs, df=freq_step_hz, fch1_mhz=fch1_mhz,
+                anomaly_map=amap, show_overlay=False,
             )
         else:
             fig, ax = plt.subplots(figsize=(9, 5))
@@ -234,9 +251,12 @@ def main():
             ax.set_ylabel("Time bin (ABACAD)")
             add_obs_dividers(ax, snippet.shape[0])
             plt.colorbar(im, ax=ax, fraction=0.046)
+            bw_hz = abs(freq_step_hz) * fchans
+            bw_label = f"{bw_hz / 1e3:.3f} kHz" if bw_hz < 1e6 else f"{bw_hz / 1e6:.4f} MHz"
             fig.suptitle(
-                f"cad={cad_idx} ({target or 'unknown'})  f_start={fs}  "
-                f"f~{f_center_mhz:.4f} MHz  {method} score={score:.4f}",
+                f"cad={cad_idx} ({target or 'unknown'})  f_start={fs} (channel)\n"
+                f"Center freq={f_center_mhz:.6f} MHz  Bandwidth={bw_label}  "
+                f"{method} score={score:.4f}",
                 fontsize=11,
             )
             plt.tight_layout()

@@ -53,7 +53,8 @@ def overlay_anomaly_map(ax, base_img: np.ndarray, amap: np.ndarray, cmap: str = 
 
 
 def plot_candidate(original, reconstruction, score, sigma, method, cad_idx,
-                    target, f_start, df, anomaly_map=None, n_obs=6, show_overlay=True):
+                    target, f_start, df, fch1_mhz=0.0, anomaly_map=None, n_obs=6,
+                    show_overlay=True):
     """Build (but don't save) the original|reconstruction|error figure for one
     candidate; caller decides whether to write it to PNG, a per-cadence PDF,
     or both.
@@ -71,6 +72,15 @@ def plot_candidate(original, reconstruction, score, sigma, method, cad_idx,
     cadence stacking) on every panel drawn at ``original``'s native time
     resolution — the two full-resolution panels (``original``,
     ``reconstruction``/residual) plus the bilinear anomaly-map overlay.
+
+    ``f_start`` is a channel index into the source file's frequency axis, not
+    a frequency — the suptitle's "Center freq" is ``fch1_mhz`` (the file
+    header's absolute sky frequency at channel 0) plus the window's own
+    offset from it, so ``fch1_mhz`` must be passed for the label to be
+    meaningful (0 = falls back to reporting the in-file offset, e.g. ~100 MHz
+    for a mid-file window, which is not a real sky frequency). ``df`` should
+    be the file header's signed ``foff`` (Hz/channel), not just a channel-
+    width magnitude, so the direction of increasing channel index is correct.
     """
     n_rows = original.shape[0]
     vmin, vmax = np.percentile(original, [1, 99])
@@ -112,13 +122,16 @@ def plot_candidate(original, reconstruction, score, sigma, method, cad_idx,
                                  title="anomaly_map (bilinear overlay)")
             add_obs_dividers(axes[2], n_rows, n_obs)
 
-    f_center_mhz = f_start * df / 1e6
+    fchans = original.shape[-1]
+    f_center_mhz = fch1_mhz + (f_start + fchans / 2) * df / 1e6
+    bw_hz = abs(df) * fchans
+    bw_label = f"{bw_hz / 1e3:.3f} kHz" if bw_hz < 1e6 else f"{bw_hz / 1e6:.4f} MHz"
     score_line = f"{method} score={score:.4f}"
     if sigma is not None:
         score_line += f" ({sigma:.1f}s)"
     fig.suptitle(
-        f"Candidate: cad={cad_idx} ({target})  f_start={f_start}  "
-        f"f~{f_center_mhz:.4f} MHz\n"
+        f"Candidate: cad={cad_idx} ({target})  f_start={f_start} (channel)\n"
+        f"Center freq={f_center_mhz:.6f} MHz  Bandwidth={bw_label}\n"
         f"{score_line}",
         fontsize=11,
     )

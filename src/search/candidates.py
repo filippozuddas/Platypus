@@ -60,14 +60,15 @@ def off_noise_ceiling(
 
 
 def _summarize_cluster(cluster_idx: np.ndarray, f_starts: np.ndarray,
-                        scores: np.ndarray, fchans: int, df: float) -> dict:
+                        scores: np.ndarray, fchans: int, df: float,
+                        fch1_mhz: float = 0.0) -> dict:
     chunk_scores = scores[cluster_idx]
     chunk_f = f_starts[cluster_idx]
     peak_local = int(np.argmax(chunk_scores))
     f_peak = int(chunk_f[peak_local])
     return {
         "f_start_peak": f_peak,
-        "freq_mhz_peak": f_peak * df / 1e6 if df else 0.0,
+        "freq_mhz_peak": fch1_mhz + f_peak * df / 1e6 if df else fch1_mhz,
         "peak_score": float(chunk_scores[peak_local]),
         "mean_score": float(chunk_scores.mean()),
         "n_snippets": int(len(cluster_idx)),
@@ -84,6 +85,7 @@ def cluster_candidates(
     stride: int,
     fchans: int,
     df: float = 0.0,
+    fch1_mhz: float = 0.0,
 ) -> pd.DataFrame:
     """Group adjacent above-threshold snippets into distinct candidates.
 
@@ -105,7 +107,12 @@ def cluster_candidates(
             between consecutive ``f_start`` values to still count as the same
             event.
         fchans: window width in channels, used for ``cluster_width_channels``.
-        df: Hz/channel, used to also report ``freq_mhz_peak`` (0 = omit).
+        df: Hz/channel (signed — the file header's ``foff`` direction, not
+            just the magnitude), used to also report ``freq_mhz_peak`` (0 = omit).
+        fch1_mhz: absolute sky frequency (MHz) of channel 0 in the source file,
+            added to the ``f_start``-derived offset so ``freq_mhz_peak`` is a
+            real frequency, not just an offset from the start of the file's
+            frequency axis (0 = report the in-file offset only).
 
     Returns:
         DataFrame, one row per cluster, sorted by ``peak_score`` descending:
@@ -133,9 +140,9 @@ def cluster_candidates(
     for i in range(1, len(idx)):
         gap = f_starts[idx[i]] - f_starts[idx[i - 1]]
         if gap > stride:
-            rows.append(_summarize_cluster(idx[start:i], f_starts, scores, fchans, df))
+            rows.append(_summarize_cluster(idx[start:i], f_starts, scores, fchans, df, fch1_mhz))
             start = i
-    rows.append(_summarize_cluster(idx[start:], f_starts, scores, fchans, df))
+    rows.append(_summarize_cluster(idx[start:], f_starts, scores, fchans, df, fch1_mhz))
 
     out = pd.DataFrame(rows, columns=columns)
     return out.sort_values("peak_score", ascending=False).reset_index(drop=True)
@@ -261,4 +268,12 @@ def full_row_hits(
         "n_off_hits_full": n_off_hits_full,
         "off_leak": off_leak,
         "in_short_list": in_short_list,
+        # The six row peaks the two gates above are derived from. Returned so a
+        # caller can re-decide `leak_frac` offline instead of re-running: the
+        # counts alone are computed at one leak_frac and throw away everything
+        # needed to try another. Measured 2026-07-23 that this parameter is what
+        # makes end-to-end completeness peak at SNR30 and fall at SNR50, so it
+        # is a knob that will be swept, not a constant.
+        "on_row_max": on_row_max.tolist(),
+        "off_row_max": off_row_max.tolist(),
     }
