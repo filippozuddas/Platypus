@@ -54,16 +54,23 @@ a pulsed signal's "snr" is a per-pulse peak rather than an integrated level.
 Compare the *shape* of survival curves across morphologies — where they fall
 off, which pipeline stage kills them — never absolute SNR between two of them.
 
-The 2D-template classes use an **energy-matched** convention (declared in
-``info["snr_convention"] = "integrated"``): the template is scaled so the total
-power it adds to an ON observation equals that of a narrowband carrier of the
-same nominal SNR, i.e. ``Frame.get_intensity(snr) * tchans_per_obs``. A shape
-spread over N pixels is therefore ``N / tchans_per_obs`` times fainter per pixel
-than the carrier it is matched to. That is deliberate — the interesting question
-is whether the search recovers an arbitrary shape at *equal transmitted energy*,
-not at equal per-pixel brightness, which would hand the extended morphologies an
-arbitrarily large advantage. It also means their curves sit low by construction:
-read the stage-by-stage shape, not the absolute level.
+The 2D-template classes are **peak-matched** by default
+(``info["snr_convention"] = "peak"``): the template's brightest pixels reach
+``Frame.get_intensity(snr)``, the same per-pixel level a narrowband carrier of
+that nominal SNR reaches. This is the convention that makes them *consistent
+with the rest of the sweep*, not a favour to them — setigen's ``f_profile`` is
+unit-HEIGHT, not unit-area, so ``wideband_*`` already injects roughly
+``width_in_channels`` times a carrier's total power at the same nominal SNR.
+
+An energy-matched alternative is kept (``SHAPE_SNR_CONVENTION = "integrated"``),
+which scales the template so its total added power equals a carrier's. It was
+the original default and is a defensible question to ask — "is the shape
+recovered at equal transmitted energy?" — but on this geometry it is not a
+*measurable* one: a canvas shape covers thousands of pixels against a carrier's
+96, so per-pixel amplitude lands around 0.1 sigma and the answer is "no" at every
+SNR, by arithmetic rather than by anything the model does. Report the convention
+whenever these morphologies' numbers are quoted; SNR is not commensurable across
+conventions any more than it is across morphologies.
 
 **Band-excursion discipline.** setigen's non-linear paths take a coefficient,
 not an excursion, and are evaluated on the cadence's ABSOLUTE timeline (~1728 s
@@ -214,14 +221,17 @@ class DirectArrayMorphology:
         # renormalised to each observation's local noise.
         ref_frame = self._gen._make_frame(obs[on_indices[0]])
         intensity = float(ref_frame.get_intensity(snr=snr))
-        # Energy-matched to a carrier occupying one channel of the WHOLE canvas,
-        # since that is what this shape spans. Note this is 2x the energy of an
-        # ON-only carrier at the same nominal SNR (which is present in 3 of 6
-        # observations), so if anything these numbers flatter the shapes relative
-        # to the narrowband classes.
-        carrier_energy = intensity * t_rows
         mass = float(template.sum())
-        amplitude = carrier_energy / mass
+        convention = site.payload.get("snr_convention", SHAPE_SNR_CONVENTION)
+        if convention == "peak":
+            # Brightest pixels reach a carrier's per-pixel level. Consistent with
+            # how setigen's unit-height f_profile already treats wideband signals.
+            amplitude = intensity
+        elif convention == "integrated":
+            # Total added power equals a carrier spanning the whole canvas.
+            amplitude = intensity * t_rows / mass
+        else:
+            raise ValueError(f"{self.name}: unknown snr_convention {convention!r}")
 
         out = obs.copy()
         for i in range(n_obs):
@@ -239,7 +249,7 @@ class DirectArrayMorphology:
             "template_cols": int(t_cols),
             "template_rows": int(t_rows),
             "span": "cadence_canvas",
-            "snr_convention": "integrated",
+            "snr_convention": convention,
         }
         info.update(site.meta)
         info["morphology"] = self.name
@@ -259,6 +269,18 @@ def _render_curve(points: np.ndarray, shape: Tuple[int, int], sigma: float) -> n
     d2 = ((rows[..., None] - points[:, 0]) ** 2
           + (cols[..., None] - points[:, 1]) ** 2).min(axis=-1)
     return np.exp(-d2 / (2.0 * sigma ** 2))
+
+
+def _normalise(template: np.ndarray) -> np.ndarray:
+    """Scale a rasterised template to peak exactly 1.0.
+
+    Without this, ``snr_convention="peak"`` would be approximate: an outline's
+    brightest pixel sits wherever the curve happens to pass closest to a pixel
+    centre, typically 0.85-1.0, so the effective SNR would carry a silent
+    few-percent jitter that varies with the shape rather than with the sweep.
+    """
+    peak = float(template.max())
+    return np.clip(template / peak, 0.0, 1.0) if peak > 0 else template
 
 
 def _polar_shape_field(shape: Tuple[int, int], centre: Tuple[float, float],
@@ -613,6 +635,12 @@ def _sample_pulsed(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
 #: a range of eccentricities rather than one canonical shape.
 SHAPE_DISPLAY_ASPECT = 1024.0 / (2.0 * 96.0)
 
+#: Amplitude convention for the 2D-template morphologies: ``"peak"`` (default,
+#: consistent with setigen's unit-height f_profiles) or ``"integrated"``. See the
+#: module docstring — this changes what the SNR axis means, so it belongs in any
+#: report of these morphologies' numbers.
+SHAPE_SNR_CONVENTION = "peak"
+
 
 def _template_geometry(gen, fchans: int, total_tchans: int,
                        r_row_frac: Tuple[float, float]) -> Tuple[float, float, float, int]:
@@ -675,7 +703,7 @@ def _sample_smiley(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
         np.stack([cy + 0.20 * r_row + curvature * (1.0 - u ** 2) * 0.45 * r_row,
                   cx + u * 0.55 * r_col], axis=1), shape, sigma)
 
-    template = np.clip(np.maximum(np.maximum(face, eyes), mouth), 0.0, 1.0)
+    template = _normalise(np.maximum(np.maximum(face, eyes), mouth))
     start_channel = int(gen.rng.integers(0, max(1, fchans - t_cols)))
 
     return Site(
@@ -730,8 +758,7 @@ def _sample_random_2d(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Si
 
     filled = bool(gen.rng.random() < 0.5)
     edge = np.exp(-signed ** 2 / (2.0 * sigma ** 2))
-    template = np.where(signed < 0.0, 1.0, edge) if filled else edge
-    template = np.clip(template, 0.0, 1.0)
+    template = _normalise(np.where(signed < 0.0, 1.0, edge) if filled else edge)
     start_channel = int(gen.rng.integers(0, max(1, fchans - t_cols)))
 
     return Site(

@@ -210,21 +210,25 @@ def test_canvas_rows_are_not_all_identical(name, data_cfg, background):
 
 
 @pytest.mark.parametrize("name", CANVAS_MORPHOLOGIES)
-def test_energy_matches_equivalent_carrier(name, data_cfg, background):
-    """Total injected power over the canvas = intensity * total_tchans.
+def test_amplitude_follows_the_declared_convention(name, data_cfg, background):
+    """The SNR axis must mean what ``info["snr_convention"]`` says it means.
 
-    This is the declared SNR convention (module docstring). If it silently became
-    per-pixel, an extended shape would inject orders of magnitude more power than
-    the narrowband class it is compared against, and the cross-morphology
-    survival curves would be meaningless.
+    Both conventions are legitimate questions but they differ by a factor of the
+    template's pixel count — thousands. A silent switch would move every shape
+    number by orders of magnitude while the CSV column still read the same, which
+    is the worst kind of error to make in a comparison table.
     """
     inj = build_morphology(name, data_cfg, seed=11)
     site = inj.sample_site(fchans=1024, total_tchans=96)
     out, info = inj.inject(background, site, snr=25.0)
 
+    excess = out - background.astype(np.float32)
     total_tchans = background.shape[0] * background.shape[1]
-    added = float((out - background.astype(np.float32)).sum())
-    assert added == pytest.approx(info["intensity"] * total_tchans, rel=1e-3)
+    if info["snr_convention"] == "peak":
+        assert float(excess.max()) == pytest.approx(info["intensity"], rel=1e-3)
+    else:
+        assert float(excess.sum()) == pytest.approx(
+            info["intensity"] * total_tchans, rel=1e-3)
 
 
 @pytest.mark.parametrize("name", CANVAS_MORPHOLOGIES)

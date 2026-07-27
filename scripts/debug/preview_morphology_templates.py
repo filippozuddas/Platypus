@@ -18,16 +18,22 @@ Two figures:
 * **zoom** — the same signals cropped to the injected region, where a shape that
   covers 3% of the band is actually legible.
 
-The background is flat gaussian noise, so anything visible is injected. Amplitude
-uses each morphology's real SNR convention, so the relative faintness of the
-energy-matched canvas shapes against a narrowband carrier is shown honestly
-rather than normalised away per panel.
+The background is flat gaussian noise, so anything visible is injected.
+
+``--show excess`` (the default) images the injected power ALONE, scaled per
+panel. That is the right view for the question this script answers: is the
+geometry what I named it? The first version defaulted to ``injected`` — signal
+plus noise on a shared scale — reasoning that showing amplitude honestly was
+better than normalising it away. That was the wrong trade for a geometry check:
+under the energy-matched convention a canvas shape sits at ~0.1 sigma per pixel,
+so the panels were uniformly blank and said nothing about the shape at all. Use
+``--show injected`` when the question is detectability instead.
 
 Usage:
     PYTHONPATH=. python scripts/debug/preview_morphology_templates.py \
         --out_dir outputs/sweeps/morphology_preview
     PYTHONPATH=. python scripts/debug/preview_morphology_templates.py \
-        --morphologies smiley_face random_2d --n_seeds 6 --snr 50
+        --morphologies smiley_face random_2d --n_seeds 6 --show injected
 """
 
 import argparse
@@ -61,6 +67,10 @@ def parse_args():
                         "as much as any single draw.")
     p.add_argument("--snr", type=float, default=50.0,
                    help="High by default: this checks geometry, not detectability.")
+    p.add_argument("--show", default="excess", choices=("excess", "injected"),
+                   help="'excess' plots the injected power alone, per-panel scaled "
+                        "(geometry check). 'injected' plots signal+noise as the "
+                        "model sees it (detectability check).")
     p.add_argument("--noise_mean", type=float, default=10.0)
     p.add_argument("--noise_std", type=float, default=0.35)
     p.add_argument("--seed0", type=int, default=0)
@@ -141,6 +151,7 @@ def main():
         for r, name in enumerate(morphs):
             for c, seed in enumerate(seeds):
                 block, excess, info = blocks[(name, seed)]
+                block = excess if args.show == "excess" else block
                 ax = axes[r][c]
                 if zoom:
                     box = bounding_box(excess)
@@ -166,7 +177,7 @@ def main():
                  if zoom else
                  "What each injector puts in the data — full cadence block, "
                  "white lines are observation boundaries")
-        fig.suptitle(f"{title}   (SNR {args.snr:g}, flat noise)",
+        fig.suptitle(f"{title}   (SNR {args.snr:g}, {args.show}, flat noise)",
                      color=INK, fontsize=11, x=0.01, ha="left")
         fig.tight_layout(rect=(0, 0, 1, 0.96))
         for ext in ("png", "pdf"):
