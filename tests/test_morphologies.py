@@ -6,6 +6,12 @@ under-constrained parameterisation sweeps the signal straight out of the window
 and every downstream sensitivity number silently becomes "no signal present"
 rather than "signal not detected" — a failure that looks exactly like a real
 negative result. See the module docstring of src/data/morphologies.py.
+
+Two contracts live here, not one. The setigen morphologies are ON-only and must
+leave the OFF observations bit-identical; the canvas morphologies (smiley_face,
+random_2d) are painted across the whole cadence block and must cross the
+observation boundaries instead. Each is checked on its own group — see
+``ON_ONLY_MORPHOLOGIES`` and ``CANVAS_MORPHOLOGIES``.
 """
 
 import numpy as np
@@ -56,7 +62,7 @@ def test_off_observations_untouched(name, data_cfg, background):
         np.testing.assert_array_equal(out[i], expected[i])
 
 
-@pytest.mark.parametrize("name", MORPHOLOGIES)
+@pytest.mark.parametrize("name", ON_ONLY_MORPHOLOGIES)
 def test_signal_lands_in_band(name, data_cfg, background):
     """Every ON observation must actually receive power.
 
@@ -77,7 +83,7 @@ def test_signal_lands_in_band(name, data_cfg, background):
         assert peak > 0, f"{name}: ON observation {i} received no power"
 
 
-@pytest.mark.parametrize("name", MORPHOLOGIES)
+@pytest.mark.parametrize("name", ON_ONLY_MORPHOLOGIES)
 @pytest.mark.parametrize("seed", range(48))
 def test_in_band_across_seeds(name, data_cfg, background, seed):
     """Containment must hold for the whole sampled parameter range, not one draw.
@@ -173,23 +179,30 @@ def test_factorial_separates_frequency_extent_from_time_structure(data_cfg, back
 
 
 @pytest.mark.parametrize("name", CANVAS_MORPHOLOGIES)
-def test_canvas_shape_reaches_every_observation(name, data_cfg, background):
-    """A canvas shape must cross the observation boundaries, OFF frames included.
+@pytest.mark.parametrize("seed", range(12))
+def test_canvas_shape_crosses_observation_boundaries(name, data_cfg, background, seed):
+    """A canvas shape must span several observations, OFF frames included.
 
     This is the opposite of the ON-only contract, and it is deliberate: a shape
     confined to one observation occupies exactly one row of the (6,64) anomaly
-    map, so the model cannot resolve its vertical structure at all. If this test
-    ever passes only on the ON rows, the shape has silently gone back to being a
+    map, so the model cannot resolve its vertical structure at all. If this ever
+    narrows to a single observation, the shape has silently gone back to being a
     bandwidth test wearing a morphology's name.
+
+    Not *every* observation: the smaller sampled radii span 4 of 6, which is
+    fine. What must hold is that the span is multi-observation and that OFF
+    frames are among them — the latter being why these morphologies are
+    scorer-level tests and are excluded from end-to-end survival reporting.
     """
-    inj = build_morphology(name, data_cfg, seed=7)
+    inj = build_morphology(name, data_cfg, seed=seed)
     site = inj.sample_site(fchans=1024, total_tchans=96)
     out, _ = inj.inject(background, site, snr=30.0)
 
     expected = background.astype(np.float32)
-    for i in range(background.shape[0]):
-        peak = float((out[i] - expected[i]).max())
-        assert peak > 0, f"{name}: observation {i} received no power"
+    hit = [i for i in range(background.shape[0])
+           if float((out[i] - expected[i]).max()) > 0]
+    assert len(hit) >= 3, f"{name}: spans only {len(hit)} observation(s) at seed {seed}"
+    assert any(i in OFF for i in hit), f"{name}: no OFF observation reached"
 
 
 @pytest.mark.parametrize("name", CANVAS_MORPHOLOGIES)

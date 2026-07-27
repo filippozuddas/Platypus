@@ -106,7 +106,7 @@ PARAM_SPECS = {
         ("sig_r_row", "size (time radius, bins)"),
         ("sig_aspect", "aspect ratio (freq/time)"),
         ("sig_n_modes", "Fourier modes"),
-        ("sig_shape_kind", "fill"),
+        ("sig_stroke_sigma", "edge softness (rows)"),
     ],
 }
 

@@ -256,18 +256,26 @@ class DirectArrayMorphology:
         return out.astype(np.float32), info
 
 
-def _render_curve(points: np.ndarray, shape: Tuple[int, int], sigma: float) -> np.ndarray:
-    """Rasterise a curve as a Gaussian-thick stroke of width ``sigma`` pixels.
+def _render_curve(points: np.ndarray, shape: Tuple[int, int], sigma: float,
+                  aspect: float = 1.0) -> np.ndarray:
+    """Rasterise a curve as a Gaussian stroke ``sigma`` ROWS thick.
 
     ``points`` is ``(N, 2)`` in ``(row, col)`` pixel coordinates. Every pixel
     takes ``exp(-d^2 / 2 sigma^2)`` on its distance ``d`` to the nearest sample.
-    Soft edges rather than a binary mask: a hard-edged shape on a 16-row grid is
-    mostly staircase artifact, and the model would be scored on the aliasing as
-    much as on the morphology.
+    Soft edges rather than a binary mask: a hard-edged shape is mostly staircase
+    artifact, and the model would be scored on the aliasing as much as on the
+    morphology.
+
+    ``aspect`` (channels per row-equivalent, see :data:`SHAPE_DISPLAY_ASPECT`)
+    makes the distance anisotropic, so the stroke is ``sigma`` rows thick
+    vertically and ``sigma * aspect`` channels thick horizontally — i.e. it has
+    *uniform* apparent thickness all the way round the curve. With the isotropic
+    version the top and bottom of a circle came out ~5x thinner than its sides
+    and rendered as hairlines.
     """
     rows, cols = np.mgrid[0:shape[0], 0:shape[1]]
     d2 = ((rows[..., None] - points[:, 0]) ** 2
-          + (cols[..., None] - points[:, 1]) ** 2).min(axis=-1)
+          + ((cols[..., None] - points[:, 1]) / aspect) ** 2).min(axis=-1)
     return np.exp(-d2 / (2.0 * sigma ** 2))
 
 
@@ -285,19 +293,24 @@ def _normalise(template: np.ndarray) -> np.ndarray:
 
 def _polar_shape_field(shape: Tuple[int, int], centre: Tuple[float, float],
                        radii: Tuple[float, float], radial) -> np.ndarray:
-    """Signed distance (in pixels, negative inside) to a star-shaped closed curve.
+    """Signed distance in ROW units (negative inside) to a star-shaped curve.
 
     ``radial(theta) -> normalised radius`` lets one expression cover both a plain
     ellipse (``radial`` constant) and a Fourier-perturbed blob.
+
+    Scaling the normalised distance by the ROW radius — not by the mean of the two
+    radii — is what makes the returned distance "row-equivalents" in both
+    directions: at the top of the ellipse it is a distance in rows, and at the
+    side it is a distance in channels divided by the aspect ratio. A stroke width
+    expressed in rows then has uniform apparent thickness all the way round,
+    matching :func:`_render_curve`.
     """
     rows, cols = np.mgrid[0:shape[0], 0:shape[1]]
     dy = (rows - centre[0]) / radii[0]
     dx = (cols - centre[1]) / radii[1]
     rho = np.sqrt(dx ** 2 + dy ** 2)
     theta = np.arctan2(dy, dx)
-    # Normalised units scaled back to pixels by the mean radius: exact for a
-    # circle, a good approximation for the mild eccentricities sampled here.
-    return (rho - radial(theta)) * 0.5 * (radii[0] + radii[1])
+    return (rho - radial(theta)) * radii[0]
 
 
 # --------------------------------------------------------------------------
@@ -653,15 +666,24 @@ def _template_geometry(gen, fchans: int, total_tchans: int,
     model then cannot resolve any vertical structure, and the "shape" test
     degenerates into a bandwidth test. See :class:`DirectArrayMorphology`.
     """
-    sigma = float(gen.rng.uniform(1.0, 2.5))
+    # Stroke width in rows. Thick enough to read as a drawn line rather than a
+    # 1-pixel scratch: ~10% of the shape's radius.
+    sigma = float(gen.rng.uniform(2.0, 3.5))
     r_row_max = max(2.0, 0.5 * total_tchans - 2.0 * sigma - 1.0)
     r_row = float(gen.rng.uniform(r_row_frac[0] * total_tchans,
                                   r_row_frac[1] * total_tchans))
     r_row = float(np.clip(r_row, 2.0, r_row_max))
-    r_col = r_row * SHAPE_DISPLAY_ASPECT * float(gen.rng.uniform(0.6, 1.6))
+    r_col = r_row * SHAPE_DISPLAY_ASPECT * float(gen.rng.uniform(0.8, 1.2))
+
+    # Clamp the WIDTH RADIUS, not the finished template width. Clipping t_cols
+    # after the fact (the previous version) let r_col exceed the template, so the
+    # sides of the shape fell outside it: a circle rendered as two horizontal
+    # arcs with no closure, and a filled blob as a rectangle.
+    col_budget = 0.5 * (max(3.0, fchans * 0.5) - 6.0 * sigma - 4.0)
+    r_col = min(r_col, col_budget)
 
     t_cols = int(np.ceil(2.0 * r_col + 6.0 * sigma + 4.0))
-    t_cols = int(np.clip(t_cols, 3, max(3, fchans // 2)))
+    t_cols = int(np.clip(t_cols, 3, fchans))
     return sigma, r_row, r_col, t_cols
 
 
@@ -689,19 +711,22 @@ def _sample_smiley(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
     cy = 0.5 * (total_tchans - 1)
     cx = 0.5 * (t_cols - 1)
 
+    aspect = r_col / r_row
+
     face = np.exp(-_polar_shape_field(shape, (cy, cx), (r_row, r_col),
                                       lambda th: 1.0) ** 2 / (2.0 * sigma ** 2))
 
-    eye_sigma = sigma * float(gen.rng.uniform(1.0, 1.8))
+    eye_sigma = sigma * float(gen.rng.uniform(1.2, 1.9))
     eyes = _render_curve(
-        np.array([[cy - 0.35 * r_row, cx - 0.40 * r_col],
-                  [cy - 0.35 * r_row, cx + 0.40 * r_col]]), shape, eye_sigma)
+        np.array([[cy - 0.35 * r_row, cx - 0.38 * r_col],
+                  [cy - 0.35 * r_row, cx + 0.38 * r_col]]), shape, eye_sigma,
+        aspect=aspect)
 
     curvature = float(gen.rng.uniform(-1.0, 1.0))
-    u = np.linspace(-1.0, 1.0, 96)
+    u = np.linspace(-1.0, 1.0, 192)
     mouth = _render_curve(
-        np.stack([cy + 0.20 * r_row + curvature * (1.0 - u ** 2) * 0.45 * r_row,
-                  cx + u * 0.55 * r_col], axis=1), shape, sigma)
+        np.stack([cy + 0.22 * r_row + curvature * (1.0 - u ** 2) * 0.42 * r_row,
+                  cx + u * 0.50 * r_col], axis=1), shape, sigma, aspect=aspect)
 
     template = _normalise(np.maximum(np.maximum(face, eyes), mouth))
     start_channel = int(gen.rng.integers(0, max(1, fchans - t_cols)))
@@ -756,15 +781,19 @@ def _sample_random_2d(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Si
         shape, (0.5 * (total_tchans - 1), 0.5 * (t_cols - 1)),
         (r_row, r_col), radial)
 
-    filled = bool(gen.rng.random() < 0.5)
+    # Always filled. The outline variant was dropped after visual review: on this
+    # canvas an outlined blob reads as a pair of thin arcs, visually and
+    # (more importantly) structurally indistinguishable from a drifting curve —
+    # which `narrowband_sine` and `narrowband_accel` already cover. A filled blob
+    # is the thing this morphology is for: extent in both axes at once.
     edge = np.exp(-signed ** 2 / (2.0 * sigma ** 2))
-    template = _normalise(np.where(signed < 0.0, 1.0, edge) if filled else edge)
+    template = _normalise(np.where(signed < 0.0, 1.0, edge))
     start_channel = int(gen.rng.integers(0, max(1, fchans - t_cols)))
 
     return Site(
         payload={"template": template, "start_channel": start_channel},
         meta={"path": "template", "span": "cadence_canvas",
-              "shape_kind": "random_filled" if filled else "random_outline",
+              "shape_kind": "random_filled",
               "r_row": r_row, "r_col": r_col, "aspect": r_col / r_row,
               "stroke_sigma": sigma, "n_modes": n_modes,
               "mode_orders": ",".join(str(int(k)) for k in orders),
