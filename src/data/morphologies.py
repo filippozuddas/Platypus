@@ -151,14 +151,30 @@ class SetigenMorphology:
 
 
 class DirectArrayMorphology:
-    """Morphologies rasterised as a 2D template and added straight to the array.
+    """A 2D template painted on the whole cadence block as one canvas.
 
-    The template spans the full height of one observation (``tchans_per_obs``
-    rows) and a sampled number of channels, and is placed at one frozen channel
-    offset. The SAME template is added to every ON observation — the shape is
-    the signal, so it must repeat on-source exactly as a carrier does, otherwise
-    it could not clear the ``n_on_hits >= 2`` stage for reasons that have
-    nothing to do with morphology.
+    The template spans **all** ``total_tchans`` rows — the six observations
+    stacked, treated as a single image — and is split back across observations at
+    injection. Two consequences, both deliberate:
+
+    * **This is a scorer-level test, not an end-to-end one.** A shape that covers
+      the canvas necessarily appears in the OFF observations, so ``full_row_hits``
+      and ``off_leak`` reject it by construction. ``survives_pipeline`` for these
+      morphologies is ~0 *by definition*, and reporting it as a sensitivity
+      result would be meaningless. The number that means something is
+      ``s0_sigma3`` and the shape of the anomaly map. Vishal's tricks 4-5 ask for
+      shapes "injected into the data" and — unlike trick 2 — do not say ON-only,
+      so this is the literal reading.
+    * **It is the only geometry the model can resolve.** The anomaly map is
+      (6, 64) over a (96, 1024) input: one map cell is 16 rows x 16 channels, and
+      one observation is exactly 16 rows. A shape confined to a single
+      observation therefore occupies exactly ONE map row, and the model has no
+      vertical resolution with which to tell a circle from a bar — an intra-
+      observation shape test measures frequency extent and nothing else. Spanning
+      the canvas gives the shape all 6 map rows.
+
+    An earlier per-observation version of these two morphologies was swept in
+    `morphologies_v3` before this was understood; those rows are superseded.
 
     Amplitude calibration borrows the setigen frame only for its noise
     statistics (``Frame.get_intensity``), so the SNR scale is the same one the
@@ -185,10 +201,11 @@ class DirectArrayMorphology:
         template = site.payload["template"]
         col0 = int(site.payload["start_channel"])
         t_rows, t_cols = template.shape
-        if t_rows != tchans_per_obs:
+        if t_rows != n_obs * tchans_per_obs:
             raise ValueError(
-                f"{self.name}: template has {t_rows} rows but the observation has "
-                f"{tchans_per_obs}. The site was sampled for a different geometry."
+                f"{self.name}: template has {t_rows} rows but the cadence canvas is "
+                f"{n_obs * tchans_per_obs}. The site was sampled for a different "
+                f"geometry."
             )
 
         # Same reference-frame convention as inject_on_only_cadence: intensity is
@@ -197,23 +214,31 @@ class DirectArrayMorphology:
         # renormalised to each observation's local noise.
         ref_frame = self._gen._make_frame(obs[on_indices[0]])
         intensity = float(ref_frame.get_intensity(snr=snr))
-        carrier_energy = intensity * tchans_per_obs
+        # Energy-matched to a carrier occupying one channel of the WHOLE canvas,
+        # since that is what this shape spans. Note this is 2x the energy of an
+        # ON-only carrier at the same nominal SNR (which is present in 3 of 6
+        # observations), so if anything these numbers flatter the shapes relative
+        # to the narrowband classes.
+        carrier_energy = intensity * t_rows
         mass = float(template.sum())
         amplitude = carrier_energy / mass
 
         out = obs.copy()
-        for i in on_indices:
-            out[i, :, col0:col0 + t_cols] += amplitude * template
+        for i in range(n_obs):
+            band = template[i * tchans_per_obs:(i + 1) * tchans_per_obs]
+            out[i, :, col0:col0 + t_cols] += amplitude * band
 
         info = {
             "snr": snr,
             "drift_rate": 0.0,
             "start_channel": col0,
             "intensity": intensity,
-            "on_indices": tuple(on_indices),
+            "on_indices": tuple(range(n_obs)),
             "peak_amplitude": amplitude * float(template.max()),
             "template_mass": mass,
             "template_cols": int(t_cols),
+            "template_rows": int(t_rows),
+            "span": "cadence_canvas",
             "snr_convention": "integrated",
         }
         info.update(site.meta)
@@ -579,20 +604,33 @@ def _sample_pulsed(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
     )
 
 
-def _template_geometry(gen, fchans: int, tchans_per_obs: int,
-                       r_row_range: Tuple[float, float]) -> Tuple[float, float, float, int]:
-    """Sample a shape's pixel-space size and the template width that holds it.
+#: Channels per time bin that make a shape look ROUND in a plotted waterfall.
+#: A (96, 1024) block drawn at ~2:1 (width:height) compresses frequency by
+#: 1024/W px and stretches time by 96/(W/2) px, so one time bin occupies the
+#: screen space of 1024/(2*96) ≈ 5.33 channels. A shape with equal row and
+#: channel radii would render as a thin vertical sliver — which is exactly what
+#: the first version produced. Aspect is jittered around this so the sweep sees
+#: a range of eccentricities rather than one canonical shape.
+SHAPE_DISPLAY_ASPECT = 1024.0 / (2.0 * 96.0)
 
-    The vertical radius is bounded so the shape plus its soft edge fits inside
-    ONE observation: an ON observation of the 0000 product is 16 time bins, and
-    a shape taller than that would be clipped at the observation boundary and
-    silently become a different morphology (a pair of horizontal bars).
+
+def _template_geometry(gen, fchans: int, total_tchans: int,
+                       r_row_frac: Tuple[float, float]) -> Tuple[float, float, float, int]:
+    """Sample a shape's pixel size on the cadence canvas, and the width to hold it.
+
+    The vertical radius is a fraction of the FULL canvas (all observations
+    stacked), bounded so the shape plus its soft edge stays inside it. Sizing it
+    to one observation instead — the first version of this code — capped the
+    shape at 16 rows, which is exactly one row of the (6, 64) anomaly map: the
+    model then cannot resolve any vertical structure, and the "shape" test
+    degenerates into a bandwidth test. See :class:`DirectArrayMorphology`.
     """
-    sigma = float(gen.rng.uniform(0.6, 1.4))
-    r_row_max = max(1.0, min(r_row_range[1], 0.5 * tchans_per_obs - 1.5 * sigma - 0.5))
-    r_row_min = min(r_row_range[0], r_row_max)
-    r_row = float(gen.rng.uniform(r_row_min, r_row_max))
-    r_col = r_row * float(gen.rng.uniform(1.0, 4.0))
+    sigma = float(gen.rng.uniform(1.0, 2.5))
+    r_row_max = max(2.0, 0.5 * total_tchans - 2.0 * sigma - 1.0)
+    r_row = float(gen.rng.uniform(r_row_frac[0] * total_tchans,
+                                  r_row_frac[1] * total_tchans))
+    r_row = float(np.clip(r_row, 2.0, r_row_max))
+    r_col = r_row * SHAPE_DISPLAY_ASPECT * float(gen.rng.uniform(0.6, 1.6))
 
     t_cols = int(np.ceil(2.0 * r_col + 6.0 * sigma + 4.0))
     t_cols = int(np.clip(t_cols, 3, max(3, fchans // 2)))
@@ -610,13 +648,17 @@ def _sample_smiley(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
     Varied per site: overall size, frequency/time aspect ratio, stroke width,
     eye size, and mouth curvature — including negative curvature, i.e. a frown,
     so the sweep is not measuring one memorised shape.
-    """
-    tchans_per_obs = max(1, int(total_tchans // max(1, n_obs)))
-    sigma, r_row, r_col, t_cols = _template_geometry(
-        gen, fchans, tchans_per_obs, (3.0, 6.0))
 
-    shape = (tchans_per_obs, t_cols)
-    cy = 0.5 * (tchans_per_obs - 1)
+    Drawn on the whole cadence canvas, so it crosses the observation boundaries
+    and appears in the OFF frames too — see :class:`DirectArrayMorphology` for
+    why that is the only geometry the model can resolve, and what it means for
+    how the result must be read.
+    """
+    sigma, r_row, r_col, t_cols = _template_geometry(
+        gen, fchans, total_tchans, (0.22, 0.40))
+
+    shape = (total_tchans, t_cols)
+    cy = 0.5 * (total_tchans - 1)
     cx = 0.5 * (t_cols - 1)
 
     face = np.exp(-_polar_shape_field(shape, (cy, cx), (r_row, r_col),
@@ -638,7 +680,7 @@ def _sample_smiley(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
 
     return Site(
         payload={"template": template, "start_channel": start_channel},
-        meta={"path": "template", "shape_kind": "smiley",
+        meta={"path": "template", "shape_kind": "smiley", "span": "cadence_canvas",
               "r_row": r_row, "r_col": r_col, "aspect": r_col / r_row,
               "stroke_sigma": sigma, "eye_sigma": eye_sigma,
               "mouth_curvature": curvature,
@@ -656,10 +698,11 @@ def _sample_random_2d(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Si
     closed and non-self-intersecting). Unlike the smiley this samples a
     *distribution* of shapes rather than variations on one, so it is the
     morphology-agnostic end of the sweep: no two sites inject the same object.
+
+    Drawn on the whole cadence canvas, like the smiley.
     """
-    tchans_per_obs = max(1, int(total_tchans // max(1, n_obs)))
     sigma, r_row, r_col, t_cols = _template_geometry(
-        gen, fchans, tchans_per_obs, (3.0, 6.0))
+        gen, fchans, total_tchans, (0.22, 0.40))
 
     n_modes = int(gen.rng.integers(2, 6))
     orders = gen.rng.choice(np.arange(2, 8), size=n_modes, replace=False)
@@ -669,8 +712,8 @@ def _sample_random_2d(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Si
 
     # `_template_geometry` sizes an unperturbed ellipse, but r(theta) reaches
     # `1 + sum(a_k)` at its widest. Shrink the base radii by that factor so the
-    # *perturbed* extent is the one that fits the observation — otherwise the
-    # blob is clipped at the time boundary and becomes a different morphology.
+    # *perturbed* extent is the one that fits the canvas — otherwise the blob is
+    # clipped at the canvas edge and becomes a different morphology.
     swell = 1.0 + float(coeffs.sum())
     r_row, r_col = r_row / swell, r_col / swell
 
@@ -680,9 +723,9 @@ def _sample_random_2d(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Si
             out = out + a * np.cos(k * theta + phi)
         return out
 
-    shape = (tchans_per_obs, t_cols)
+    shape = (total_tchans, t_cols)
     signed = _polar_shape_field(
-        shape, (0.5 * (tchans_per_obs - 1), 0.5 * (t_cols - 1)),
+        shape, (0.5 * (total_tchans - 1), 0.5 * (t_cols - 1)),
         (r_row, r_col), radial)
 
     filled = bool(gen.rng.random() < 0.5)
@@ -693,7 +736,8 @@ def _sample_random_2d(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Si
 
     return Site(
         payload={"template": template, "start_channel": start_channel},
-        meta={"path": "template", "shape_kind": "random_filled" if filled else "random_outline",
+        meta={"path": "template", "span": "cadence_canvas",
+              "shape_kind": "random_filled" if filled else "random_outline",
               "r_row": r_row, "r_col": r_col, "aspect": r_col / r_row,
               "stroke_sigma": sigma, "n_modes": n_modes,
               "mode_orders": ",".join(str(int(k)) for k in orders),
@@ -735,6 +779,12 @@ MORPHOLOGIES = tuple(_MORPHOLOGIES)
 #: rather than to the bandwidth — the two are confounded in any single cell.
 FACTORIAL_2X2 = ("narrowband_drift", "narrowband_pulsed",
                  "wideband_continuous", "wideband_pulsed")
+
+#: Morphologies painted on the whole cadence canvas. They appear in the OFF
+#: observations by construction, so the ON/OFF stages reject them by definition
+#: and only `s0_sigma3` and the anomaly map carry information. Anything that
+#: reports end-to-end survival must exclude them or label them separately.
+CANVAS_MORPHOLOGIES = ("smiley_face", "random_2d")
 
 
 def build_morphology(name: str, data_cfg: dict, seed: Optional[int] = None):

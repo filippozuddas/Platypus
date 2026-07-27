@@ -12,9 +12,17 @@ import numpy as np
 import pytest
 import yaml
 
-from src.data.morphologies import MORPHOLOGIES, build_morphology
+from src.data.morphologies import CANVAS_MORPHOLOGIES, MORPHOLOGIES, build_morphology
 
 ON, OFF = (0, 2, 4), (1, 3, 5)
+
+# The canvas morphologies (smiley_face, random_2d) are painted across all six
+# observations, so they appear in the OFF frames BY DESIGN and are excluded from
+# the ON-only contract below. That is not a relaxation of the contract — it is a
+# different one, checked in its own tests further down. See
+# src/data/morphologies.py::DirectArrayMorphology for why the canvas geometry is
+# the only one the (6,64) anomaly map can resolve.
+ON_ONLY_MORPHOLOGIES = tuple(m for m in MORPHOLOGIES if m not in CANVAS_MORPHOLOGIES)
 
 
 @pytest.fixture(scope="module")
@@ -30,7 +38,7 @@ def background():
     return rng.normal(loc=10.0, scale=0.1, size=(6, 16, 1024))
 
 
-@pytest.mark.parametrize("name", MORPHOLOGIES)
+@pytest.mark.parametrize("name", ON_ONLY_MORPHOLOGIES)
 def test_off_observations_untouched(name, data_cfg, background):
     """OFF observations must come back bit-for-bit, as a real signal would vanish.
 
@@ -164,60 +172,70 @@ def test_factorial_separates_frequency_extent_from_time_structure(data_cfg, back
     assert wb_puls_rows < wb_cont_rows
 
 
-TEMPLATE_MORPHOLOGIES = ("smiley_face", "random_2d")
+@pytest.mark.parametrize("name", CANVAS_MORPHOLOGIES)
+def test_canvas_shape_reaches_every_observation(name, data_cfg, background):
+    """A canvas shape must cross the observation boundaries, OFF frames included.
 
-
-@pytest.mark.parametrize("name", TEMPLATE_MORPHOLOGIES)
-def test_template_identical_in_every_on_observation(name, data_cfg, background):
-    """The shape IS the signal, so it must repeat on-source unchanged.
-
-    A template that differed between ON observations could fail the
-    ``n_on_hits >= 2`` stage for a reason unrelated to morphology, which is
-    exactly the confound the sweep exists to avoid.
+    This is the opposite of the ON-only contract, and it is deliberate: a shape
+    confined to one observation occupies exactly one row of the (6,64) anomaly
+    map, so the model cannot resolve its vertical structure at all. If this test
+    ever passes only on the ON rows, the shape has silently gone back to being a
+    bandwidth test wearing a morphology's name.
     """
     inj = build_morphology(name, data_cfg, seed=7)
     site = inj.sample_site(fchans=1024, total_tchans=96)
     out, _ = inj.inject(background, site, snr=30.0)
 
-    excess = [out[i] - background.astype(np.float32)[i] for i in ON]
-    for other in excess[1:]:
-        np.testing.assert_allclose(excess[0], other, rtol=0, atol=1e-5)
+    expected = background.astype(np.float32)
+    for i in range(background.shape[0]):
+        peak = float((out[i] - expected[i]).max())
+        assert peak > 0, f"{name}: observation {i} received no power"
 
 
-@pytest.mark.parametrize("name", TEMPLATE_MORPHOLOGIES)
+@pytest.mark.parametrize("name", CANVAS_MORPHOLOGIES)
+def test_canvas_rows_are_not_all_identical(name, data_cfg, background):
+    """Vertical structure must actually exist — the point of the canvas geometry.
+
+    A shape whose rows were all equal would be a vertical bar, indistinguishable
+    from a wideband carrier, and every "shape" number would be measuring
+    bandwidth. Comparing the top and middle bands of the canvas is the cheapest
+    check that the rasteriser is drawing a 2D object.
+    """
+    inj = build_morphology(name, data_cfg, seed=7)
+    site = inj.sample_site(fchans=1024, total_tchans=96)
+    template = site.payload["template"]
+
+    per_row_mass = template.sum(axis=1)
+    assert per_row_mass.std() > 0.05 * per_row_mass.mean()
+
+
+@pytest.mark.parametrize("name", CANVAS_MORPHOLOGIES)
 def test_energy_matches_equivalent_carrier(name, data_cfg, background):
-    """Total injected power per ON observation = intensity * tchans_per_obs.
+    """Total injected power over the canvas = intensity * total_tchans.
 
-    This is the declared SNR convention (module docstring). If it silently
-    became per-pixel, an extended shape would inject orders of magnitude more
-    power than the narrowband class it is compared against, and the
-    cross-morphology survival curves would be meaningless.
+    This is the declared SNR convention (module docstring). If it silently became
+    per-pixel, an extended shape would inject orders of magnitude more power than
+    the narrowband class it is compared against, and the cross-morphology
+    survival curves would be meaningless.
     """
     inj = build_morphology(name, data_cfg, seed=11)
     site = inj.sample_site(fchans=1024, total_tchans=96)
     out, info = inj.inject(background, site, snr=25.0)
 
-    tchans_per_obs = background.shape[1]
-    expected = info["intensity"] * tchans_per_obs
-    for i in ON:
-        added = float((out[i] - background.astype(np.float32)[i]).sum())
-        assert added == pytest.approx(expected, rel=1e-3)
+    total_tchans = background.shape[0] * background.shape[1]
+    added = float((out - background.astype(np.float32)).sum())
+    assert added == pytest.approx(info["intensity"] * total_tchans, rel=1e-3)
 
 
-@pytest.mark.parametrize("name", TEMPLATE_MORPHOLOGIES)
+@pytest.mark.parametrize("name", CANVAS_MORPHOLOGIES)
 @pytest.mark.parametrize("seed", range(24))
-def test_template_fits_inside_one_observation(name, data_cfg, seed):
-    """No clipping at the observation boundary, for any draw.
-
-    An ON observation of the 0000 product is 16 time bins. A shape sampled
-    taller than that would be truncated into a pair of bars — a different
-    morphology than the one the CSV says was injected.
-    """
+def test_canvas_template_fits_the_block(name, data_cfg, seed):
+    """No clipping at the canvas edge or the band edge, for any draw."""
     inj = build_morphology(name, data_cfg, seed=seed)
     site = inj.sample_site(fchans=1024, total_tchans=96)
     template = site.payload["template"]
 
-    assert template.shape[0] == 16
+    assert template.shape[0] == 96
     assert 0 <= site.payload["start_channel"]
     assert site.payload["start_channel"] + template.shape[1] <= 1024
     # Structure must be interior: mass on the first/last row means the shape was
@@ -226,6 +244,12 @@ def test_template_fits_inside_one_observation(name, data_cfg, seed):
     # An outline's peak depends on how close the curve passes to a pixel centre,
     # so this is a "the shape is actually there" floor, not a normalisation.
     assert template.max() > 0.5
+    # It must span several map rows, which is the entire reason for the change:
+    # 16 rows = 1 map row, and the old geometry never exceeded that.
+    # A random blob's Fourier perturbation can pull its vertical radius in, so the
+    # bar is "more than one map row" (16), not the nominal height.
+    lit = np.where(template.max(axis=1) > 0.1)[0]
+    assert (lit[-1] - lit[0]) > 24, f"{name}: spans ~1 anomaly-map row at seed {seed}"
 
 
 def test_unknown_morphology_names_alternatives(data_cfg):
