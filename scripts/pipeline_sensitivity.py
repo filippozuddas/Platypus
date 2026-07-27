@@ -313,6 +313,13 @@ def main():
                         "score": score, "on_off_contrast": contrast,
                         "n_on_hits_full": fr["n_on_hits_full"],
                         "n_off_hits_full": fr["n_off_hits_full"],
+                        # Row peaks, so leak_frac can be re-decided from this CSV
+                        # rather than by re-running the sweep. `on_ref` is the
+                        # weakest ON row, which is the denominator of the leak
+                        # gate; `off_row_max` decides how many OFF rows clear it.
+                        "on_ref": min(fr["on_row_max"]) if fr["on_row_max"] else 0.0,
+                        **{f"on_row_max_{i}": v for i, v in enumerate(fr["on_row_max"])},
+                        **{f"off_row_max_{i}": v for i, v in enumerate(fr["off_row_max"])},
                         "far_thresh": far_thresh, "loose_thresh": loose_thresh,
                         "thresh_3": thresh_3, "off_ceiling": off_ceiling,
                         "rank_in_shortlist": rank,
