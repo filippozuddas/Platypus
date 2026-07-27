@@ -29,6 +29,21 @@ under the energy-matched convention a canvas shape sits at ~0.1 sigma per pixel,
 so the panels were uniformly blank and said nothing about the shape at all. Use
 ``--show injected`` when the question is detectability instead.
 
+**On "why is that one brighter at the same SNR".** Two reasons, and only one is
+about the signal. First, ``--vscale``: with the default per-panel autoscaling a
+*stronger* signal makes its panel look DARKER, because it raises ``vmax`` and
+compresses the noise into the bottom of the colormap — which is why a panel with
+a bright drifting line has a dark background while a panel with almost no signal
+is uniformly mid-green. Pass ``--vscale global`` before reading anything into
+apparent brightness. Second, and real: ``get_intensity(snr)`` sets the per-pixel
+amplitude a signal confined to ONE channel would need for that integrated SNR,
+and setigen's profiles are unit-height rather than unit-area — so a wideband band
+at "the same SNR" has the same per-pixel level as a carrier while carrying
+hundreds of times its total power. SNR labels peak amplitude, not energy. A third,
+smaller, genuine effect: the narrowband classes sample ``constant`` vs
+``scintillating`` time profiles, and a scintillating envelope has excursions above
+its unit mean, so peaks differ between seeds of one class.
+
 Usage:
     PYTHONPATH=. python scripts/debug/preview_morphology_templates.py \
         --out_dir outputs/sweeps/morphology_preview
@@ -68,9 +83,15 @@ def parse_args():
     p.add_argument("--snr", type=float, default=50.0,
                    help="High by default: this checks geometry, not detectability.")
     p.add_argument("--show", default="excess", choices=("excess", "injected"),
-                   help="'excess' plots the injected power alone, per-panel scaled "
-                        "(geometry check). 'injected' plots signal+noise as the "
-                        "model sees it (detectability check).")
+                   help="'excess' plots the injected power alone (geometry check). "
+                        "'injected' plots signal+noise as the model sees it "
+                        "(detectability check).")
+    p.add_argument("--vscale", default="panel", choices=("panel", "row", "global"),
+                   help="Colour-scale sharing. 'panel' (default) autoscales each "
+                        "panel — right for geometry, but brightness is then "
+                        "comparable to NOTHING and a stronger signal makes its "
+                        "panel look darker. 'row' compares variants of one "
+                        "morphology; 'global' compares morphologies.")
     p.add_argument("--noise_mean", type=float, default=10.0)
     p.add_argument("--noise_std", type=float, default=0.35)
     p.add_argument("--seed0", type=int, default=0)
@@ -95,9 +116,10 @@ def injected_block(name, data_cfg, seed, snr, geom, noise):
             np.concatenate(list(excess), axis=0), info)
 
 
-def draw_block(ax, block, n_obs, tchans_per_obs, title=None, extent=None):
+def draw_block(ax, block, n_obs, tchans_per_obs, title=None, extent=None,
+               vlim=(None, None)):
     ax.imshow(block, aspect="auto", origin="upper", cmap="viridis",
-              interpolation="nearest", extent=extent)
+              interpolation="nearest", extent=extent, vmin=vlim[0], vmax=vlim[1])
     for i in range(1, n_obs):
         y = i * tchans_per_obs - 0.5
         if extent is None:
@@ -144,11 +166,27 @@ def main():
             blocks[(name, seed)] = injected_block(name, data_cfg, seed, args.snr,
                                                   geom, noise)
 
+    def limits(names):
+        """1st-99.5th percentile of the plotted quantity over ``names``.
+
+        Percentiles rather than min/max: a single saturated pixel would otherwise
+        set the scale for every panel sharing it.
+        """
+        idx = 1 if args.show == "excess" else 0
+        vals = np.concatenate([blocks[(n, s)][idx].ravel()
+                               for n in names for s in seeds])
+        return tuple(np.percentile(vals, [1, 99.5]))
+
+    global_vlim = limits(morphs) if args.vscale == "global" else (None, None)
+
     for figname, zoom in (("gallery", False), ("zoom", True)):
         fig, axes = plt.subplots(len(morphs), len(seeds),
                                  figsize=(3.0 * len(seeds), 1.7 * len(morphs)),
                                  squeeze=False)
         for r, name in enumerate(morphs):
+            vlim = (limits([name]) if args.vscale == "row"
+                    else global_vlim if args.vscale == "global"
+                    else (None, None))
             for c, seed in enumerate(seeds):
                 block, excess, info = blocks[(name, seed)]
                 block = excess if args.show == "excess" else block
@@ -160,7 +198,7 @@ def main():
                         continue
                     r0, r1, c0, c1 = box
                     draw_block(ax, block[r0:r1, c0:c1], n_obs, tchans_per_obs,
-                               title=f"rows {r0}-{r1}, chans {c0}-{c1}")
+                               title=f"rows {r0}-{r1}, chans {c0}-{c1}", vlim=vlim)
                     # Dividers in cropped coordinates: a canvas shape must be seen
                     # crossing them, which is the whole point of the change.
                     for i in range(1, n_obs):
@@ -169,7 +207,7 @@ def main():
                             ax.axhline(y, color="white", linewidth=0.9, alpha=0.85)
                 else:
                     draw_block(ax, block, n_obs, tchans_per_obs,
-                               title=f"seed {seed}")
+                               title=f"seed {seed}", vlim=vlim)
                 if c == 0:
                     ax.set_ylabel(name, color=INK, fontsize=9, rotation=0,
                                   ha="right", va="center", labelpad=8)
@@ -177,7 +215,11 @@ def main():
                  if zoom else
                  "What each injector puts in the data — full cadence block, "
                  "white lines are observation boundaries")
-        fig.suptitle(f"{title}   (SNR {args.snr:g}, {args.show}, flat noise)",
+        scale_note = {"panel": "autoscaled per panel — brightness comparable to NOTHING",
+                      "row": "shared scale per morphology",
+                      "global": "one shared scale everywhere"}[args.vscale]
+        fig.suptitle(f"{title}   (SNR {args.snr:g}, {args.show}, flat noise; "
+                     f"{scale_note})",
                      color=INK, fontsize=11, x=0.01, ha="left")
         fig.tight_layout(rect=(0, 0, 1, 0.96))
         for ext in ("png", "pdf"):
