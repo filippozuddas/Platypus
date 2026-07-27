@@ -27,12 +27,25 @@ Two families implement the interface:
 
 * :class:`SetigenMorphology` — signals expressible as setigen's
   ``(path, t_profile, f_profile)`` decomposition, rendered ON-only through
-  ``_SetigenInjector.inject_on_only_cadence``. Covers the drifting, accelerating,
-  sinusoidal and pulsed classes.
+  ``_SetigenInjector.inject_on_only_cadence``. Covers the drifting, accelerating
+  and sinusoidal classes plus the (frequency extent) x (time structure)
+  factorial: ``narrowband_drift`` / ``narrowband_pulsed`` /
+  ``wideband_continuous`` / ``wideband_pulsed``. That factorial exists because a
+  single pulsed cell cannot say whether a deficit comes from the pulsing or from
+  the bandwidth, and the two imply different fixes.
 * :class:`DirectArrayMorphology` — signals that decomposition cannot express,
-  because their frequency extent varies with time (a dispersed sweep is not a
-  ``path`` times an ``f_profile``). Renders a 2D template directly onto each ON
-  observation, following ``BroadbandTransientGenerator``'s approach.
+  because their extent in frequency varies with time and is not separable into a
+  path times a profile. Covers the smiley-face and random-2D-shape classes:
+  a 2D template is rasterised once per site and added to each ON observation,
+  following ``BroadbandTransientGenerator``'s direct-array approach.
+
+  These exist because they are the only morphologies in the sweep that a
+  narrowband matched filter cannot express *at all*. The three narrowband
+  classes and the pulsed beacon are all still tracks in the time-frequency
+  plane; an arbitrary 2D shape is not, so it is the actual test of the project's
+  central claim — sensitivity to arbitrary morphology, which is what justifies
+  an autoencoder search over turboSETI. A dispersed broadband sweep (the
+  ``0001`` product's signal class) would also belong here and is NOT implemented.
 
 **SNR is not commensurable across morphologies.** Each family normalises
 amplitude by its own convention (setigen's frame-integrated
@@ -40,6 +53,17 @@ amplitude by its own convention (setigen's frame-integrated
 a pulsed signal's "snr" is a per-pulse peak rather than an integrated level.
 Compare the *shape* of survival curves across morphologies — where they fall
 off, which pipeline stage kills them — never absolute SNR between two of them.
+
+The 2D-template classes use an **energy-matched** convention (declared in
+``info["snr_convention"] = "integrated"``): the template is scaled so the total
+power it adds to an ON observation equals that of a narrowband carrier of the
+same nominal SNR, i.e. ``Frame.get_intensity(snr) * tchans_per_obs``. A shape
+spread over N pixels is therefore ``N / tchans_per_obs`` times fainter per pixel
+than the carrier it is matched to. That is deliberate — the interesting question
+is whether the search recovers an arbitrary shape at *equal transmitted energy*,
+not at equal per-pixel brightness, which would hand the extended morphologies an
+arbitrarily large advantage. It also means their curves sit low by construction:
+read the stage-by-stage shape, not the absolute level.
 
 **Band-excursion discipline.** setigen's non-linear paths take a coefficient,
 not an excursion, and are evaluated on the cadence's ABSOLUTE timeline (~1728 s
@@ -126,6 +150,109 @@ class SetigenMorphology:
         return out, info
 
 
+class DirectArrayMorphology:
+    """Morphologies rasterised as a 2D template and added straight to the array.
+
+    The template spans the full height of one observation (``tchans_per_obs``
+    rows) and a sampled number of channels, and is placed at one frozen channel
+    offset. The SAME template is added to every ON observation — the shape is
+    the signal, so it must repeat on-source exactly as a carrier does, otherwise
+    it could not clear the ``n_on_hits >= 2`` stage for reasons that have
+    nothing to do with morphology.
+
+    Amplitude calibration borrows the setigen frame only for its noise
+    statistics (``Frame.get_intensity``), so the SNR scale is the same one the
+    setigen morphologies use before the energy matching described in the module
+    docstring is applied. No setigen path or profile is involved.
+    """
+
+    def __init__(self, name: str, generator, sampler: Callable[..., Site]):
+        self.name = name
+        self._gen = generator
+        self._sampler = sampler
+
+    @property
+    def rng(self) -> np.random.Generator:
+        return self._gen.rng
+
+    def sample_site(self, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
+        return self._sampler(self._gen, fchans, total_tchans, n_obs)
+
+    def inject(self, obs_windows: np.ndarray, site: Site, snr: float,
+               on_indices: Tuple[int, ...] = ON_INDICES) -> Tuple[np.ndarray, dict]:
+        obs = np.asarray(obs_windows, dtype=float)
+        n_obs, tchans_per_obs, fchans = obs.shape
+        template = site.payload["template"]
+        col0 = int(site.payload["start_channel"])
+        t_rows, t_cols = template.shape
+        if t_rows != tchans_per_obs:
+            raise ValueError(
+                f"{self.name}: template has {t_rows} rows but the observation has "
+                f"{tchans_per_obs}. The site was sampled for a different geometry."
+            )
+
+        # Same reference-frame convention as inject_on_only_cadence: intensity is
+        # computed ONCE from the first ON frame and reused, so the injected shape
+        # has one constant physical amplitude across the cadence instead of being
+        # renormalised to each observation's local noise.
+        ref_frame = self._gen._make_frame(obs[on_indices[0]])
+        intensity = float(ref_frame.get_intensity(snr=snr))
+        carrier_energy = intensity * tchans_per_obs
+        mass = float(template.sum())
+        amplitude = carrier_energy / mass
+
+        out = obs.copy()
+        for i in on_indices:
+            out[i, :, col0:col0 + t_cols] += amplitude * template
+
+        info = {
+            "snr": snr,
+            "drift_rate": 0.0,
+            "start_channel": col0,
+            "intensity": intensity,
+            "on_indices": tuple(on_indices),
+            "peak_amplitude": amplitude * float(template.max()),
+            "template_mass": mass,
+            "template_cols": int(t_cols),
+            "snr_convention": "integrated",
+        }
+        info.update(site.meta)
+        info["morphology"] = self.name
+        return out.astype(np.float32), info
+
+
+def _render_curve(points: np.ndarray, shape: Tuple[int, int], sigma: float) -> np.ndarray:
+    """Rasterise a curve as a Gaussian-thick stroke of width ``sigma`` pixels.
+
+    ``points`` is ``(N, 2)`` in ``(row, col)`` pixel coordinates. Every pixel
+    takes ``exp(-d^2 / 2 sigma^2)`` on its distance ``d`` to the nearest sample.
+    Soft edges rather than a binary mask: a hard-edged shape on a 16-row grid is
+    mostly staircase artifact, and the model would be scored on the aliasing as
+    much as on the morphology.
+    """
+    rows, cols = np.mgrid[0:shape[0], 0:shape[1]]
+    d2 = ((rows[..., None] - points[:, 0]) ** 2
+          + (cols[..., None] - points[:, 1]) ** 2).min(axis=-1)
+    return np.exp(-d2 / (2.0 * sigma ** 2))
+
+
+def _polar_shape_field(shape: Tuple[int, int], centre: Tuple[float, float],
+                       radii: Tuple[float, float], radial) -> np.ndarray:
+    """Signed distance (in pixels, negative inside) to a star-shaped closed curve.
+
+    ``radial(theta) -> normalised radius`` lets one expression cover both a plain
+    ellipse (``radial`` constant) and a Fourier-perturbed blob.
+    """
+    rows, cols = np.mgrid[0:shape[0], 0:shape[1]]
+    dy = (rows - centre[0]) / radii[0]
+    dx = (cols - centre[1]) / radii[1]
+    rho = np.sqrt(dx ** 2 + dy ** 2)
+    theta = np.arctan2(dy, dx)
+    # Normalised units scaled back to pixels by the mean radius: exact for a
+    # circle, a good approximation for the mild eccentricities sampled here.
+    return (rho - radial(theta)) * 0.5 * (radii[0] + radii[1])
+
+
 # --------------------------------------------------------------------------
 # Samplers. One per morphology; each returns a Site with everything frozen
 # except amplitude.
@@ -144,7 +271,8 @@ def _sample_drifting(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Sit
         payload={"drift_rate": drift_rate, "start_channel": start_channel,
                  "f_profile": f_profile, "t_profile_builder": t_builder,
                  "path_builder": None},
-        meta={**meta, "path": "constant"},
+        meta={**meta, "path": "constant",
+              "freq_extent": "narrowband", "time_structure": "continuous"},
     )
 
 
@@ -267,16 +395,16 @@ def _sample_sinusoidal(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> S
     )
 
 
-def _sample_pulsed(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
-    """Trick 3 — wide-band periodic pulse train (radar/beacon-like).
+def _sample_pulse_timing(gen, p, total_tchans: int, n_obs: int) -> Dict[str, Any]:
+    """Sample a pulse train's period and width, capped at ONE observation.
 
-    Reuses ``WidebandPulsedGenerator``'s frequency-extent and pulse sampling,
-    but renders through the shared ON-only cadence path rather than the
-    generator's own single-frame ``inject_signal``, so the OFF observations stay
-    untouched exactly as for every other morphology here.
+    Shared by the wideband and narrowband pulsed morphologies so the two differ
+    in frequency extent and in nothing else — that is the whole point of having
+    both (see :func:`_sample_narrowband_pulsed`). ``p`` supplies the timing
+    ranges (``WidebandParams``) regardless of which generator owns the geometry.
 
-    **The pulse period is capped at ONE observation's length**, not the cadence's.
-    An ON observation is only ``total_tchans / n_obs`` bins (16 for the 0000
+    **The period is capped at one observation's length**, not the cadence's. An
+    ON observation is only ``total_tchans / n_obs`` bins (16 for the 0000
     product) while the generator's own default allows periods up to half the
     frame (48 bins); a train with a period longer than an observation can place
     zero pulses inside an ON block, and the sweep would then record "pulsed
@@ -291,6 +419,119 @@ def _sample_pulsed(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
     different (and interesting) morphology — they degenerate towards "present in
     some ON blocks only" — but they belong to a separate experiment where the
     number of illuminated ON blocks is the measured variable, not a nuisance.
+    """
+    tchans_per_obs = max(1, int(total_tchans // max(1, n_obs)))
+    period_max = min(p.period_bins_max_frac * total_tchans, float(tchans_per_obs))
+    period_min = min(p.period_bins_min, period_max)
+    period_bins = float(gen.rng.uniform(period_min, max(period_min + 1e-9, period_max)))
+    pulse_width_bins = float(gen.rng.uniform(1.0, max(1.0, p.duty_max * period_bins)))
+    return {
+        "period_s": period_bins * p.dt,
+        "pulse_width_s": pulse_width_bins * p.dt,
+        "period_bins": period_bins,
+        "tchans_per_obs": tchans_per_obs,
+        "pulses_per_obs": tchans_per_obs / period_bins,
+        "duty": pulse_width_bins / period_bins,
+        "seed": int(gen.rng.integers(0, 2 ** 31)),
+    }
+
+
+def _periodic_t_profile_builder(timing: Dict[str, Any]):
+    def t_profile_builder(intensity: float, n_bins: int):
+        return stg.periodic_gaussian_t_profile(
+            pulse_width=timing["pulse_width_s"] * u.s,
+            period=timing["period_s"] * u.s,
+            pulse_direction="up",
+            amplitude=intensity,
+            level=0.0,
+            min_level=0.0,
+            seed=timing["seed"],
+        )
+    return t_profile_builder
+
+
+def _sample_narrowband_pulsed(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
+    """Trick 3, narrowband arm — a blinking carrier.
+
+    Vishal's brief says "pulsating signal with changing periodicity" and does
+    NOT say wideband; ``wideband_pulsed`` supplies both at once and therefore
+    cannot attribute its own result. This arm takes the drift, linewidth and
+    frequency profile from the *narrowband* sampler — bit-identical to
+    ``narrowband_drift`` — and replaces only the time profile with the same
+    pulse train ``wideband_pulsed`` uses.
+
+    Together the four classes form a 2x2 in (frequency extent) x (time
+    structure): ``narrowband_drift`` / ``narrowband_pulsed`` /
+    ``wideband_continuous`` / ``wideband_pulsed``. That factorial is what
+    separates "the pipeline is penalising pulsed signals" from "the pipeline is
+    penalising diffuse ones" — two claims the existing single-cell measurement
+    conflates, and which imply different fixes.
+    """
+    drift_rate, start_channel, f_profile, _, meta = \
+        gen.sample_cadence_signal_params(fchans, total_tchans)
+    timing = _sample_pulse_timing(gen, gen.aux_params, total_tchans, n_obs)
+
+    return Site(
+        payload={"drift_rate": drift_rate, "start_channel": start_channel,
+                 "f_profile": f_profile,
+                 "t_profile_builder": _periodic_t_profile_builder(timing),
+                 "path_builder": None},
+        meta={**meta, "path": "constant", "t_profile": "periodic_gaussian",
+              "freq_extent": "narrowband", "time_structure": "pulsed",
+              "period_s": timing["period_s"],
+              "pulse_width_s": timing["pulse_width_s"],
+              "period_bins": timing["period_bins"],
+              "pulses_per_obs": timing["pulses_per_obs"],
+              "duty": timing["duty"], "snr_convention": "pulse_peak"},
+    )
+
+
+def _sample_wideband_continuous(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
+    """The fourth cell of the 2x2 — a wide, steady band with no time structure.
+
+    Physically the least motivated of the six (a broadband carrier that never
+    switches off looks like receiver gain), but it is the control that makes the
+    other three interpretable: it isolates frequency extent with the pulse train
+    removed, exactly as ``narrowband_pulsed`` isolates the pulse train with the
+    frequency extent removed.
+    """
+    p = gen.params
+    frac = float(gen.rng.uniform(p.frac_low, p.frac_high))
+    width_hz = max(1.0, frac * fchans) * p.df
+    f_profile, f_name = gen._select_f_profile(width_hz)
+    drift_rate = float(gen.rng.uniform(-p.drift_jitter, p.drift_jitter))
+    start_channel = int(gen.rng.integers(1, max(2, fchans - 1)))
+
+    def t_profile_builder(intensity: float, n_bins: int):
+        return stg.constant_t_profile(level=intensity)
+
+    return Site(
+        payload={"drift_rate": drift_rate, "start_channel": start_channel,
+                 "f_profile": f_profile, "t_profile_builder": t_profile_builder,
+                 "path_builder": None},
+        meta={"path": "constant", "width": width_hz, "width_frac": frac,
+              "f_profile": f_name, "t_profile": "constant",
+              "freq_extent": "wideband", "time_structure": "continuous",
+              "start_channel": int(start_channel)},
+    )
+
+
+def _sample_pulsed(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
+    """Trick 3, wideband arm — wide-band periodic pulse train (radar/beacon-like).
+
+    Reuses ``WidebandPulsedGenerator``'s frequency-extent and pulse sampling,
+    but renders through the shared ON-only cadence path rather than the
+    generator's own single-frame ``inject_signal``, so the OFF observations stay
+    untouched exactly as for every other morphology here.
+
+    The pulse period is capped at ONE observation's length; see
+    :func:`_sample_pulse_timing` for why, and for the scope restriction that
+    implies. The timing draw is **inlined here rather than delegated to that
+    helper** even though the two are identical: the helper draws its pulse seed
+    before the drift rate, and routing this sampler through it would shift the
+    RNG stream and stop `wideband_pulsed` reproducing the `morphologies_v2`
+    sweep bit-for-bit. Six duplicated lines are cheaper than losing a paired
+    comparison against results already on disk.
 
     ``snr`` is a per-pulse peak level here, not a frame-integrated SNR — the
     train is off for most of the frame, so integrated SNR is roughly
@@ -329,6 +570,7 @@ def _sample_pulsed(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
                  "path_builder": None},
         meta={"path": "constant", "width": width_hz, "width_frac": frac,
               "f_profile": f_name, "t_profile": "periodic_gaussian",
+              "freq_extent": "wideband", "time_structure": "pulsed",
               "period_s": period_s, "pulse_width_s": pulse_width_s,
               "period_bins": period_bins, "tchans_per_obs": tchans_per_obs,
               "pulses_per_obs": tchans_per_obs / period_bins,
@@ -337,18 +579,162 @@ def _sample_pulsed(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
     )
 
 
+def _template_geometry(gen, fchans: int, tchans_per_obs: int,
+                       r_row_range: Tuple[float, float]) -> Tuple[float, float, float, int]:
+    """Sample a shape's pixel-space size and the template width that holds it.
+
+    The vertical radius is bounded so the shape plus its soft edge fits inside
+    ONE observation: an ON observation of the 0000 product is 16 time bins, and
+    a shape taller than that would be clipped at the observation boundary and
+    silently become a different morphology (a pair of horizontal bars).
+    """
+    sigma = float(gen.rng.uniform(0.6, 1.4))
+    r_row_max = max(1.0, min(r_row_range[1], 0.5 * tchans_per_obs - 1.5 * sigma - 0.5))
+    r_row_min = min(r_row_range[0], r_row_max)
+    r_row = float(gen.rng.uniform(r_row_min, r_row_max))
+    r_col = r_row * float(gen.rng.uniform(1.0, 4.0))
+
+    t_cols = int(np.ceil(2.0 * r_col + 6.0 * sigma + 4.0))
+    t_cols = int(np.clip(t_cols, 3, max(3, fchans // 2)))
+    return sigma, r_row, r_col, t_cols
+
+
+def _sample_smiley(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
+    """Trick 4 — a smiley face, with variations.
+
+    Not a plausible astrophysical or engineered signal, and that is the point:
+    it is a shape with no track-like structure at all, so a narrowband matched
+    filter has nothing to match. Recovery here measures whether the anomaly
+    score responds to *unfamiliar structure* rather than to a line.
+
+    Varied per site: overall size, frequency/time aspect ratio, stroke width,
+    eye size, and mouth curvature — including negative curvature, i.e. a frown,
+    so the sweep is not measuring one memorised shape.
+    """
+    tchans_per_obs = max(1, int(total_tchans // max(1, n_obs)))
+    sigma, r_row, r_col, t_cols = _template_geometry(
+        gen, fchans, tchans_per_obs, (3.0, 6.0))
+
+    shape = (tchans_per_obs, t_cols)
+    cy = 0.5 * (tchans_per_obs - 1)
+    cx = 0.5 * (t_cols - 1)
+
+    face = np.exp(-_polar_shape_field(shape, (cy, cx), (r_row, r_col),
+                                      lambda th: 1.0) ** 2 / (2.0 * sigma ** 2))
+
+    eye_sigma = sigma * float(gen.rng.uniform(1.0, 1.8))
+    eyes = _render_curve(
+        np.array([[cy - 0.35 * r_row, cx - 0.40 * r_col],
+                  [cy - 0.35 * r_row, cx + 0.40 * r_col]]), shape, eye_sigma)
+
+    curvature = float(gen.rng.uniform(-1.0, 1.0))
+    u = np.linspace(-1.0, 1.0, 96)
+    mouth = _render_curve(
+        np.stack([cy + 0.20 * r_row + curvature * (1.0 - u ** 2) * 0.45 * r_row,
+                  cx + u * 0.55 * r_col], axis=1), shape, sigma)
+
+    template = np.clip(np.maximum(np.maximum(face, eyes), mouth), 0.0, 1.0)
+    start_channel = int(gen.rng.integers(0, max(1, fchans - t_cols)))
+
+    return Site(
+        payload={"template": template, "start_channel": start_channel},
+        meta={"path": "template", "shape_kind": "smiley",
+              "r_row": r_row, "r_col": r_col, "aspect": r_col / r_row,
+              "stroke_sigma": sigma, "eye_sigma": eye_sigma,
+              "mouth_curvature": curvature,
+              "expression": "smile" if curvature > 0 else "frown",
+              "template_cols": t_cols, "start_channel": start_channel},
+    )
+
+
+def _sample_random_2d(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
+    """Trick 5 — a random closed 2D blob, filled or outlined.
+
+    The radius is a Fourier series in the polar angle,
+    ``r(theta) = 1 + sum_k a_k cos(k theta + phi_k)``, with the coefficients
+    bounded so the radius stays positive and the curve stays star-shaped (hence
+    closed and non-self-intersecting). Unlike the smiley this samples a
+    *distribution* of shapes rather than variations on one, so it is the
+    morphology-agnostic end of the sweep: no two sites inject the same object.
+    """
+    tchans_per_obs = max(1, int(total_tchans // max(1, n_obs)))
+    sigma, r_row, r_col, t_cols = _template_geometry(
+        gen, fchans, tchans_per_obs, (3.0, 6.0))
+
+    n_modes = int(gen.rng.integers(2, 6))
+    orders = gen.rng.choice(np.arange(2, 8), size=n_modes, replace=False)
+    coeffs = gen.rng.uniform(0.05, 0.30, size=n_modes)
+    coeffs = coeffs * (0.55 / max(0.55, coeffs.sum()))  # keep r(theta) > 0
+    phases = gen.rng.uniform(0.0, 2.0 * np.pi, size=n_modes)
+
+    # `_template_geometry` sizes an unperturbed ellipse, but r(theta) reaches
+    # `1 + sum(a_k)` at its widest. Shrink the base radii by that factor so the
+    # *perturbed* extent is the one that fits the observation — otherwise the
+    # blob is clipped at the time boundary and becomes a different morphology.
+    swell = 1.0 + float(coeffs.sum())
+    r_row, r_col = r_row / swell, r_col / swell
+
+    def radial(theta):
+        out = np.ones_like(theta)
+        for k, a, phi in zip(orders, coeffs, phases):
+            out = out + a * np.cos(k * theta + phi)
+        return out
+
+    shape = (tchans_per_obs, t_cols)
+    signed = _polar_shape_field(
+        shape, (0.5 * (tchans_per_obs - 1), 0.5 * (t_cols - 1)),
+        (r_row, r_col), radial)
+
+    filled = bool(gen.rng.random() < 0.5)
+    edge = np.exp(-signed ** 2 / (2.0 * sigma ** 2))
+    template = np.where(signed < 0.0, 1.0, edge) if filled else edge
+    template = np.clip(template, 0.0, 1.0)
+    start_channel = int(gen.rng.integers(0, max(1, fchans - t_cols)))
+
+    return Site(
+        payload={"template": template, "start_channel": start_channel},
+        meta={"path": "template", "shape_kind": "random_filled" if filled else "random_outline",
+              "r_row": r_row, "r_col": r_col, "aspect": r_col / r_row,
+              "stroke_sigma": sigma, "n_modes": n_modes,
+              "mode_orders": ",".join(str(int(k)) for k in orders),
+              "template_cols": t_cols, "start_channel": start_channel},
+    )
+
+
 # --------------------------------------------------------------------------
 # Registry
 # --------------------------------------------------------------------------
 
-_SETIGEN_MORPHOLOGIES = {
-    "narrowband_drift": (NarrowbandParams, NarrowbandDriftingGenerator, _sample_drifting),
-    "narrowband_accel": (NarrowbandParams, NarrowbandDriftingGenerator, _sample_accelerating),
-    "narrowband_sine": (NarrowbandParams, NarrowbandDriftingGenerator, _sample_sinusoidal),
-    "wideband_pulsed": (WidebandParams, WidebandPulsedGenerator, _sample_pulsed),
+# family, params dataclass, generator, sampler, auxiliary params (or None).
+#
+# ORDER IS LOAD-BEARING and new entries go at the END. `pipeline_sensitivity.py`
+# seeds each site with `100000 * m_idx`, where `m_idx` is the position in the
+# list it was given; reordering the first four would stop them reproducing the
+# `morphologies_v2` sweep already on disk.
+#
+# The 2D-template morphologies borrow NarrowbandDriftingGenerator purely for its
+# seeded rng, frame geometry and SNR calibration — none of its path/profile
+# machinery is reached. `narrowband_pulsed` takes its geometry from the
+# narrowband params and only its pulse *timing* ranges from the wideband block,
+# which is what the auxiliary slot is for.
+_MORPHOLOGIES = {
+    "narrowband_drift": (SetigenMorphology, NarrowbandParams, NarrowbandDriftingGenerator, _sample_drifting, None),
+    "narrowband_accel": (SetigenMorphology, NarrowbandParams, NarrowbandDriftingGenerator, _sample_accelerating, None),
+    "narrowband_sine": (SetigenMorphology, NarrowbandParams, NarrowbandDriftingGenerator, _sample_sinusoidal, None),
+    "wideband_pulsed": (SetigenMorphology, WidebandParams, WidebandPulsedGenerator, _sample_pulsed, None),
+    "narrowband_pulsed": (SetigenMorphology, NarrowbandParams, NarrowbandDriftingGenerator, _sample_narrowband_pulsed, WidebandParams),
+    "wideband_continuous": (SetigenMorphology, WidebandParams, WidebandPulsedGenerator, _sample_wideband_continuous, None),
+    "smiley_face": (DirectArrayMorphology, NarrowbandParams, NarrowbandDriftingGenerator, _sample_smiley, None),
+    "random_2d": (DirectArrayMorphology, NarrowbandParams, NarrowbandDriftingGenerator, _sample_random_2d, None),
 }
 
-MORPHOLOGIES = tuple(_SETIGEN_MORPHOLOGIES)
+MORPHOLOGIES = tuple(_MORPHOLOGIES)
+
+#: The (frequency extent) x (time structure) factorial. Reporting these four
+#: together is what lets a pulsed-signal deficit be attributed to the pulsing
+#: rather than to the bandwidth — the two are confounded in any single cell.
+FACTORIAL_2X2 = ("narrowband_drift", "narrowband_pulsed",
+                 "wideband_continuous", "wideband_pulsed")
 
 
 def build_morphology(name: str, data_cfg: dict, seed: Optional[int] = None):
@@ -358,10 +744,13 @@ def build_morphology(name: str, data_cfg: dict, seed: Optional[int] = None):
     each morphology reads its geometry and sampling ranges from the block its
     params dataclass owns, so frame geometry stays a single source of truth.
     """
-    if name not in _SETIGEN_MORPHOLOGIES:
+    if name not in _MORPHOLOGIES:
         raise ValueError(
             f"Unknown morphology '{name}'. Available: {', '.join(MORPHOLOGIES)}."
         )
-    params_cls, gen_cls, sampler = _SETIGEN_MORPHOLOGIES[name]
+    family, params_cls, gen_cls, sampler, aux_cls = _MORPHOLOGIES[name]
     generator = gen_cls(params_cls.from_config(data_cfg), seed=seed)
-    return SetigenMorphology(name, generator, sampler)
+    # Samplers that mix two params blocks (geometry from one, ranges from
+    # another) read the second here rather than reaching for the config.
+    generator.aux_params = aux_cls.from_config(data_cfg) if aux_cls else None
+    return family(name, generator, sampler)

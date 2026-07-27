@@ -122,6 +122,112 @@ def test_info_is_traceable(name, data_cfg, background):
     assert "path" in info and "start_channel" in info
 
 
+def _occupancy(name, data_cfg, background, seeds=range(8)):
+    """Median (occupied channels, occupied time rows) of an ON observation.
+
+    "Occupied" is measured at 10% of the injection's own peak, so a gaussian
+    frequency profile's tails do not count as extent. Medianed over seeds
+    because both axes are sampled per site.
+    """
+    cols, rows = [], []
+    for seed in seeds:
+        inj = build_morphology(name, data_cfg, seed=seed)
+        site = inj.sample_site(fchans=1024, total_tchans=96)
+        out, _ = inj.inject(background, site, snr=50.0)
+        excess = out[ON[0]] - background.astype(np.float32)[ON[0]]
+        mask = excess > 0.1 * excess.max()
+        cols.append(int(mask.any(axis=0).sum()))
+        rows.append(int(mask.any(axis=1).sum()))
+    return float(np.median(cols)), float(np.median(rows))
+
+
+def test_factorial_separates_frequency_extent_from_time_structure(data_cfg, background):
+    """The 2x2 must actually vary the two axes independently.
+
+    If it does not, a pulsed-signal deficit cannot be attributed: the existing
+    single ``wideband_pulsed`` cell varies both at once, which is the reason
+    these two arms were added. Guarding the factorial here means a later tweak
+    to either sampler cannot silently collapse it back into one cell.
+    """
+    nb_cont_cols, nb_cont_rows = _occupancy("narrowband_drift", data_cfg, background)
+    nb_puls_cols, nb_puls_rows = _occupancy("narrowband_pulsed", data_cfg, background)
+    wb_cont_cols, wb_cont_rows = _occupancy("wideband_continuous", data_cfg, background)
+    wb_puls_cols, wb_puls_rows = _occupancy("wideband_pulsed", data_cfg, background)
+
+    # Frequency axis: wideband occupies far more channels, at both time structures.
+    assert wb_cont_cols > 10 * nb_cont_cols
+    assert wb_puls_cols > 10 * nb_puls_cols
+    # Time axis: a pulse train leaves gaps, a continuous signal does not.
+    assert nb_cont_rows == background.shape[1]
+    assert wb_cont_rows == background.shape[1]
+    assert nb_puls_rows < nb_cont_rows
+    assert wb_puls_rows < wb_cont_rows
+
+
+TEMPLATE_MORPHOLOGIES = ("smiley_face", "random_2d")
+
+
+@pytest.mark.parametrize("name", TEMPLATE_MORPHOLOGIES)
+def test_template_identical_in_every_on_observation(name, data_cfg, background):
+    """The shape IS the signal, so it must repeat on-source unchanged.
+
+    A template that differed between ON observations could fail the
+    ``n_on_hits >= 2`` stage for a reason unrelated to morphology, which is
+    exactly the confound the sweep exists to avoid.
+    """
+    inj = build_morphology(name, data_cfg, seed=7)
+    site = inj.sample_site(fchans=1024, total_tchans=96)
+    out, _ = inj.inject(background, site, snr=30.0)
+
+    excess = [out[i] - background.astype(np.float32)[i] for i in ON]
+    for other in excess[1:]:
+        np.testing.assert_allclose(excess[0], other, rtol=0, atol=1e-5)
+
+
+@pytest.mark.parametrize("name", TEMPLATE_MORPHOLOGIES)
+def test_energy_matches_equivalent_carrier(name, data_cfg, background):
+    """Total injected power per ON observation = intensity * tchans_per_obs.
+
+    This is the declared SNR convention (module docstring). If it silently
+    became per-pixel, an extended shape would inject orders of magnitude more
+    power than the narrowband class it is compared against, and the
+    cross-morphology survival curves would be meaningless.
+    """
+    inj = build_morphology(name, data_cfg, seed=11)
+    site = inj.sample_site(fchans=1024, total_tchans=96)
+    out, info = inj.inject(background, site, snr=25.0)
+
+    tchans_per_obs = background.shape[1]
+    expected = info["intensity"] * tchans_per_obs
+    for i in ON:
+        added = float((out[i] - background.astype(np.float32)[i]).sum())
+        assert added == pytest.approx(expected, rel=1e-3)
+
+
+@pytest.mark.parametrize("name", TEMPLATE_MORPHOLOGIES)
+@pytest.mark.parametrize("seed", range(24))
+def test_template_fits_inside_one_observation(name, data_cfg, seed):
+    """No clipping at the observation boundary, for any draw.
+
+    An ON observation of the 0000 product is 16 time bins. A shape sampled
+    taller than that would be truncated into a pair of bars — a different
+    morphology than the one the CSV says was injected.
+    """
+    inj = build_morphology(name, data_cfg, seed=seed)
+    site = inj.sample_site(fchans=1024, total_tchans=96)
+    template = site.payload["template"]
+
+    assert template.shape[0] == 16
+    assert 0 <= site.payload["start_channel"]
+    assert site.payload["start_channel"] + template.shape[1] <= 1024
+    # Structure must be interior: mass on the first/last row means the shape was
+    # cut off rather than sized to fit.
+    assert template[0].max() < 0.5 and template[-1].max() < 0.5
+    # An outline's peak depends on how close the curve passes to a pixel centre,
+    # so this is a "the shape is actually there" floor, not a normalisation.
+    assert template.max() > 0.5
+
+
 def test_unknown_morphology_names_alternatives(data_cfg):
     with pytest.raises(ValueError, match="narrowband_drift"):
         build_morphology("does_not_exist", data_cfg)
