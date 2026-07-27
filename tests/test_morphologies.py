@@ -136,6 +136,63 @@ def test_info_is_traceable(name, data_cfg, background):
     assert "path" in info and "start_channel" in info
 
 
+PULSED_MORPHOLOGIES = ("narrowband_pulsed", "wideband_pulsed")
+
+
+@pytest.mark.parametrize("name", PULSED_MORPHOLOGIES)
+@pytest.mark.parametrize("seed", range(24))
+def test_pulse_train_stays_resolvable(name, data_cfg, background, seed):
+    """Pulses must be resolved by the product's time sampling, and be plural.
+
+    The failure this guards is not a crash. Inheriting ``WidebandParams``' period
+    range — tuned for a product with 1.07 s bins — gave 1-2 pulses per 16-bin
+    observation and pulse widths down to a single 18.25 s bin, i.e. a gaussian
+    evaluated at one point. Detection then depended on where the pulse centre fell
+    relative to a bin centre, and `narrowband_pulsed` scored 2.6% at SNR 15 for
+    reasons that had nothing to do with the model. A sweep in that regime looks
+    perfectly healthy and reports a number that means nothing.
+    """
+    inj = build_morphology(name, data_cfg, seed=seed)
+    site = inj.sample_site(fchans=1024, total_tchans=96)
+    _, info = inj.inject(background, site, snr=30.0)
+
+    assert info["pulse_width_bins"] >= 1.5, "pulse narrower than the sampling limit"
+    assert info["pulses_per_obs"] >= 2.0, "fewer than 2 pulses per ON observation"
+    assert 0.25 <= info["duty"] <= 0.85, f"duty {info['duty']:.2f} out of range"
+
+
+def test_pulsed_cells_of_the_factorial_share_their_timing_distribution(
+        data_cfg, background):
+    """The 2x2's two pulsed cells must differ in bandwidth and nothing else.
+
+    The contract is on the *distribution*, not on individual sites: the two
+    samplers consume different numbers of random draws before reaching the timing
+    (one runs the full narrowband parameter sampler first, the other a bandwidth
+    draw), so the same seed gives different realised periods — and that is fine,
+    because the sweep averages over 500 sites per cell. What must not happen is
+    the two drawing from different ranges, which would make every
+    narrowband-vs-wideband comparison also a comparison of pulse periods.
+    """
+    stats = {}
+    for name in PULSED_MORPHOLOGIES:
+        pulses, duties = [], []
+        for seed in range(40):
+            inj = build_morphology(name, data_cfg, seed=seed)
+            site = inj.sample_site(fchans=1024, total_tchans=96)
+            _, info = inj.inject(background, site, snr=30.0)
+            pulses.append(info["pulses_per_obs"])
+            duties.append(info["duty"])
+        stats[name] = (float(np.mean(pulses)), float(np.mean(duties)),
+                       min(pulses), max(pulses))
+
+    nb, wb = stats["narrowband_pulsed"], stats["wideband_pulsed"]
+    assert nb[0] == pytest.approx(wb[0], rel=0.2), f"pulses/obs differ: {stats}"
+    assert nb[1] == pytest.approx(wb[1], rel=0.2), f"duty differs: {stats}"
+    # Both must exercise the declared range rather than a corner of it.
+    for name, (_, _, lo, hi) in stats.items():
+        assert lo < 3.0 and hi > 5.0, f"{name} covers only {lo:.1f}-{hi:.1f}"
+
+
 def _occupancy(name, data_cfg, background, seeds=range(8)):
     """Median (occupied channels, occupied time rows) of an ON observation.
 

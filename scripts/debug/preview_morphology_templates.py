@@ -20,22 +20,28 @@ Two figures:
 
 The background is flat gaussian noise, so anything visible is injected.
 
-``--show excess`` (the default) images the injected power ALONE, scaled per
-panel. That is the right view for the question this script answers: is the
-geometry what I named it? The first version defaulted to ``injected`` — signal
+``--show excess`` (the default) images the injected power ALONE. That is the right
+view for the question this script answers: is the geometry what I named it? The
+first version defaulted to ``injected`` — signal
 plus noise on a shared scale — reasoning that showing amplitude honestly was
 better than normalising it away. That was the wrong trade for a geometry check:
 under the energy-matched convention a canvas shape sits at ~0.1 sigma per pixel,
 so the panels were uniformly blank and said nothing about the shape at all. Use
 ``--show injected`` when the question is detectability instead.
 
-**On "why is that one brighter at the same SNR".** Two reasons, and only one is
-about the signal. First, ``--vscale``: with the default per-panel autoscaling a
-*stronger* signal makes its panel look DARKER, because it raises ``vmax`` and
-compresses the noise into the bottom of the colormap — which is why a panel with
-a bright drifting line has a dark background while a panel with almost no signal
-is uniformly mid-green. Pass ``--vscale global`` before reading anything into
-apparent brightness. Second, and real: ``get_intensity(snr)`` sets the per-pixel
+**On reading brightness off these panels — the colour scale will lie to you in
+two different ways unless it is absolute.** With ``--vscale panel`` a *stronger*
+signal makes its panel look DARKER, because it raises ``vmax`` and compresses the
+noise into the bottom of the colormap: that is why a panel holding a bright
+drifting line has a dark background while one holding almost no signal is
+uniformly mid-green. With ``row``/``global`` the limits are percentiles of the
+data, so they scale WITH the signal — doubling ``--snr`` then leaves every signal
+looking identical and merely darkens the noise, which is the exact symptom that
+gives the artefact away. ``--vscale sigma`` (the default) anchors the limits to
+the known noise sigma instead and is the only mode in which apparent brightness
+tracks amplitude, or is comparable between two runs.
+
+**A real reason a class can be brighter at the same nominal SNR:** ``get_intensity(snr)`` sets the per-pixel
 amplitude a signal confined to ONE channel would need for that integrated SNR,
 and setigen's profiles are unit-height rather than unit-area — so a wideband band
 at "the same SNR" has the same per-pixel level as a carrier while carrying
@@ -86,12 +92,18 @@ def parse_args():
                    help="'excess' plots the injected power alone (geometry check). "
                         "'injected' plots signal+noise as the model sees it "
                         "(detectability check).")
-    p.add_argument("--vscale", default="panel", choices=("panel", "row", "global"),
-                   help="Colour-scale sharing. 'panel' (default) autoscales each "
-                        "panel — right for geometry, but brightness is then "
-                        "comparable to NOTHING and a stronger signal makes its "
-                        "panel look darker. 'row' compares variants of one "
-                        "morphology; 'global' compares morphologies.")
+    p.add_argument("--vscale", default="sigma",
+                   choices=("sigma", "panel", "row", "global"),
+                   help="Colour scale. 'sigma' (default) is absolute, anchored to "
+                        "the known noise sigma — the ONLY mode in which raising "
+                        "--snr makes the signal look brighter, and the only one "
+                        "comparable across runs. 'panel'/'row'/'global' take "
+                        "percentiles of the DATA, so they rescale with the signal "
+                        "and hide amplitude changes: doubling the SNR then leaves "
+                        "the signal looking identical and merely darkens the noise.")
+    p.add_argument("--vmax_sigma", type=float, default=12.0,
+                   help="With --vscale sigma: colour saturates at this many noise "
+                        "sigma above the mean.")
     p.add_argument("--noise_mean", type=float, default=10.0)
     p.add_argument("--noise_std", type=float, default=0.35)
     p.add_argument("--seed0", type=int, default=0)
@@ -177,6 +189,14 @@ def main():
                                for n in names for s in seeds])
         return tuple(np.percentile(vals, [1, 99.5]))
 
+    # Absolute limits in noise units. The background is generated here, so its
+    # sigma is known exactly rather than estimated — no percentile needed, and the
+    # scale is identical between two runs at different --snr, which is the whole
+    # point: "brighter" then means brighter.
+    sigma_vlim = ((0.0, args.vmax_sigma * args.noise_std) if args.show == "excess"
+                  else (args.noise_mean - 3.0 * args.noise_std,
+                        args.noise_mean + args.vmax_sigma * args.noise_std))
+
     global_vlim = limits(morphs) if args.vscale == "global" else (None, None)
 
     for figname, zoom in (("gallery", False), ("zoom", True)):
@@ -184,7 +204,8 @@ def main():
                                  figsize=(3.0 * len(seeds), 1.7 * len(morphs)),
                                  squeeze=False)
         for r, name in enumerate(morphs):
-            vlim = (limits([name]) if args.vscale == "row"
+            vlim = (sigma_vlim if args.vscale == "sigma"
+                    else limits([name]) if args.vscale == "row"
                     else global_vlim if args.vscale == "global"
                     else (None, None))
             for c, seed in enumerate(seeds):
@@ -215,9 +236,12 @@ def main():
                  if zoom else
                  "What each injector puts in the data — full cadence block, "
                  "white lines are observation boundaries")
-        scale_note = {"panel": "autoscaled per panel — brightness comparable to NOTHING",
-                      "row": "shared scale per morphology",
-                      "global": "one shared scale everywhere"}[args.vscale]
+        scale_note = {
+            "sigma": f"absolute scale, saturating at {args.vmax_sigma:g} sigma",
+            "panel": "autoscaled per panel — brightness comparable to NOTHING",
+            "row": "shared scale per morphology — rescales with the signal",
+            "global": "one shared scale — rescales with the signal",
+        }[args.vscale]
         fig.suptitle(f"{title}   (SNR {args.snr:g}, {args.show}, flat noise; "
                      f"{scale_note})",
                      color=INK, fontsize=11, x=0.01, ha="left")

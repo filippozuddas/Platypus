@@ -455,43 +455,72 @@ def _sample_sinusoidal(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> S
     )
 
 
+#: Pulses inside one ON observation. THE parameter of a pulsed morphology on this
+#: product, and the one the v2 analysis showed dominates its detectability
+#: (survival fell 70% -> 7% from the shortest to the longest sampled period).
+#: Sampling this rather than a period in bins is what keeps the class inside the
+#: regime the product can actually resolve — see :func:`_sample_pulse_timing`.
+PULSES_PER_OBS_RANGE = (2.0, 6.0)
+
+#: Floor on pulse width, in time bins. A `periodic_gaussian_t_profile` narrower
+#: than the sampling interval is a gaussian evaluated at one point: whether the
+#: sampled peak reaches its nominal amplitude then depends on where the pulse
+#: centre falls relative to a bin centre, so the injected SNR carries a large,
+#: silent, per-site error. 1.5 bins keeps every pulse resolved.
+MIN_PULSE_WIDTH_BINS = 1.5
+
+#: Duty cycle range. Bounded below so a pulse is a pulse rather than a spike, and
+#: above so consecutive pulses stay separated.
+DUTY_RANGE = (0.30, 0.60)
+
+
 def _sample_pulse_timing(gen, p, total_tchans: int, n_obs: int) -> Dict[str, Any]:
-    """Sample a pulse train's period and width, capped at ONE observation.
+    """Sample a pulse train from PULSES PER OBSERVATION, not from a period in bins.
 
     Shared by the wideband and narrowband pulsed morphologies so the two differ
     in frequency extent and in nothing else — that is the whole point of having
-    both (see :func:`_sample_narrowband_pulsed`). ``p`` supplies the timing
-    ranges (``WidebandParams``) regardless of which generator owns the geometry.
+    both (see :func:`_sample_narrowband_pulsed`). ``p`` supplies ``dt``.
 
-    **The period is capped at one observation's length**, not the cadence's. An
-    ON observation is only ``total_tchans / n_obs`` bins (16 for the 0000
-    product) while the generator's own default allows periods up to half the
-    frame (48 bins); a train with a period longer than an observation can place
-    zero pulses inside an ON block, and the sweep would then record "pulsed
-    signal not recovered" for a window that contains no pulse at all — the same
-    silent failure mode as an out-of-band track, and just as easy to misread as
-    a real negative. Capping at the observation length guarantees at least one
-    pulse per ON block, so the measurement is detectability rather than luck of
-    the beacon's phase.
+    **Why not the generator's own period range.** ``WidebandParams`` defaults
+    (``period_bins_min=8``, ``period_bins_max_frac=0.5``, ``duty_max=0.33``) were
+    tuned for the 0002 product: dt ~1.07 s, 64-bin frames. On 0000 dt is 18.25 s
+    and an ON observation is 16 bins, so those same numbers give a period of 8-16
+    bins — **1 to 2 pulses per observation** — and a pulse width that can fall to
+    a single bin, i.e. to the sampling limit. A sweep run there does not measure
+    whether a blinking beacon is detectable; it measures where the pulses land
+    relative to the sampling grid. That is how `narrowband_pulsed` came to score
+    2.6% at SNR 15 in `morphologies_v3`: not a model result.
 
-    The cost is a declared scope restriction: this tests beacons whose period is
+    So the timing is derived from the product's own geometry instead of inherited
+    from another product's config block. ``period = tchans_per_obs / pulses``,
+    with ``pulses`` in :data:`PULSES_PER_OBS_RANGE` and the width floored at
+    :data:`MIN_PULSE_WIDTH_BINS`.
+
+    Declared scope restriction, unchanged: this tests beacons whose period is
     short relative to a single observation. Longer-period trains are a genuinely
-    different (and interesting) morphology — they degenerate towards "present in
-    some ON blocks only" — but they belong to a separate experiment where the
-    number of illuminated ON blocks is the measured variable, not a nuisance.
+    different morphology — they degenerate towards "present in some ON blocks
+    only" — and belong to a separate experiment where the number of illuminated ON
+    blocks is the measured variable rather than a nuisance.
     """
     tchans_per_obs = max(1, int(total_tchans // max(1, n_obs)))
-    period_max = min(p.period_bins_max_frac * total_tchans, float(tchans_per_obs))
-    period_min = min(p.period_bins_min, period_max)
-    period_bins = float(gen.rng.uniform(period_min, max(period_min + 1e-9, period_max)))
-    pulse_width_bins = float(gen.rng.uniform(1.0, max(1.0, p.duty_max * period_bins)))
+    pulses = float(gen.rng.uniform(*PULSES_PER_OBS_RANGE))
+    period_bins = max(1e-9, tchans_per_obs / pulses)
+
+    duty = float(gen.rng.uniform(*DUTY_RANGE))
+    pulse_width_bins = max(MIN_PULSE_WIDTH_BINS, duty * period_bins)
+    # Report the duty the injection actually has, not the one sampled: the floor
+    # can raise it, and a CSV column that disagrees with the data is worse than
+    # no column.
+    duty = pulse_width_bins / period_bins
+
     return {
         "period_s": period_bins * p.dt,
         "pulse_width_s": pulse_width_bins * p.dt,
         "period_bins": period_bins,
+        "pulse_width_bins": pulse_width_bins,
         "tchans_per_obs": tchans_per_obs,
         "pulses_per_obs": tchans_per_obs / period_bins,
-        "duty": pulse_width_bins / period_bins,
+        "duty": duty,
         "seed": int(gen.rng.integers(0, 2 ** 31)),
     }
 
@@ -541,6 +570,8 @@ def _sample_narrowband_pulsed(gen, fchans: int, total_tchans: int, n_obs: int = 
               "period_s": timing["period_s"],
               "pulse_width_s": timing["pulse_width_s"],
               "period_bins": timing["period_bins"],
+              "pulse_width_bins": timing["pulse_width_bins"],
+              "tchans_per_obs": timing["tchans_per_obs"],
               "pulses_per_obs": timing["pulses_per_obs"],
               "duty": timing["duty"], "snr_convention": "pulse_peak"},
     )
@@ -584,14 +615,13 @@ def _sample_pulsed(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
     generator's own single-frame ``inject_signal``, so the OFF observations stay
     untouched exactly as for every other morphology here.
 
-    The pulse period is capped at ONE observation's length; see
-    :func:`_sample_pulse_timing` for why, and for the scope restriction that
-    implies. The timing draw is **inlined here rather than delegated to that
-    helper** even though the two are identical: the helper draws its pulse seed
-    before the drift rate, and routing this sampler through it would shift the
-    RNG stream and stop `wideband_pulsed` reproducing the `morphologies_v2`
-    sweep bit-for-bit. Six duplicated lines are cheaper than losing a paired
-    comparison against results already on disk.
+    Timing comes from :func:`_sample_pulse_timing`, shared verbatim with
+    ``narrowband_pulsed`` — the two pulsed cells of the 2x2 must differ in
+    frequency extent and in NOTHING else, or the factorial cannot attribute a
+    deficit to the bandwidth. (An earlier version inlined a copy of the timing
+    draw here to preserve the `morphologies_v2` RNG stream. That is moot now that
+    the timing ranges themselves have changed: both pulsed cells are superseded
+    from `morphologies_v4` on, so the duplication bought nothing and is gone.)
 
     ``snr`` is a per-pulse peak level here, not a frame-integrated SNR — the
     train is off for most of the frame, so integrated SNR is roughly
@@ -602,39 +632,25 @@ def _sample_pulsed(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
     width_hz = max(1.0, frac * fchans) * p.df
     f_profile, f_name = gen._select_f_profile(width_hz)
 
-    tchans_per_obs = max(1, int(total_tchans // max(1, n_obs)))
-    period_max = min(p.period_bins_max_frac * total_tchans, float(tchans_per_obs))
-    period_min = min(p.period_bins_min, period_max)
-    period_bins = float(gen.rng.uniform(period_min, max(period_min + 1e-9, period_max)))
-    pulse_width_bins = float(gen.rng.uniform(1.0, max(1.0, p.duty_max * period_bins)))
-    period_s, pulse_width_s = period_bins * p.dt, pulse_width_bins * p.dt
-
+    timing = _sample_pulse_timing(gen, p, total_tchans, n_obs)
     drift_rate = float(gen.rng.uniform(-p.drift_jitter, p.drift_jitter))
     start_channel = int(gen.rng.integers(1, max(2, fchans - 1)))
-    pulse_seed = int(gen.rng.integers(0, 2 ** 31))
-
-    def t_profile_builder(intensity: float, n_bins: int):
-        return stg.periodic_gaussian_t_profile(
-            pulse_width=pulse_width_s * u.s,
-            period=period_s * u.s,
-            pulse_direction="up",
-            amplitude=intensity,
-            level=0.0,
-            min_level=0.0,
-            seed=pulse_seed,
-        )
 
     return Site(
         payload={"drift_rate": drift_rate, "start_channel": start_channel,
-                 "f_profile": f_profile, "t_profile_builder": t_profile_builder,
+                 "f_profile": f_profile,
+                 "t_profile_builder": _periodic_t_profile_builder(timing),
                  "path_builder": None},
         meta={"path": "constant", "width": width_hz, "width_frac": frac,
               "f_profile": f_name, "t_profile": "periodic_gaussian",
               "freq_extent": "wideband", "time_structure": "pulsed",
-              "period_s": period_s, "pulse_width_s": pulse_width_s,
-              "period_bins": period_bins, "tchans_per_obs": tchans_per_obs,
-              "pulses_per_obs": tchans_per_obs / period_bins,
-              "duty": pulse_width_bins / period_bins,
+              "period_s": timing["period_s"],
+              "pulse_width_s": timing["pulse_width_s"],
+              "period_bins": timing["period_bins"],
+              "pulse_width_bins": timing["pulse_width_bins"],
+              "tchans_per_obs": timing["tchans_per_obs"],
+              "pulses_per_obs": timing["pulses_per_obs"],
+              "duty": timing["duty"],
               "start_channel": int(start_channel), "snr_convention": "pulse_peak"},
     )
 
