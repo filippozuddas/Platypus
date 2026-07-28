@@ -651,14 +651,20 @@ def _sample_pulsed(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
     )
 
 
-#: Channels per time bin that make a shape look ROUND in a plotted waterfall.
-#: A (96, 1024) block drawn at ~2:1 (width:height) compresses frequency by
-#: 1024/W px and stretches time by 96/(W/2) px, so one time bin occupies the
-#: screen space of 1024/(2*96) ≈ 5.33 channels. A shape with equal row and
-#: channel radii would render as a thin vertical sliver — which is exactly what
-#: the first version produced. Aspect is jittered around this so the sweep sees
-#: a range of eccentricities rather than one canonical shape.
-SHAPE_DISPLAY_ASPECT = 1024.0 / (2.0 * 96.0)
+#: Channels per time bin, so a shape reads as round rather than as a sliver in a
+#: plotted waterfall. Equal row and channel radii render as a thin vertical
+#: scratch, because the frequency axis is compressed by ~1024/96 relative to time.
+#:
+#: **Calibrated on the rendered preview, not derived.** The first version computed
+#: it analytically — a (96,1024) block drawn at 2:1 gives 1024/(2*96) ≈ 5.3
+#: channels per time bin — and that overshot badly in practice: the faces came out
+#: flattened. The derivation assumes a panel aspect the real figure does not have,
+#: so the value below is set from what `preview_morphology_templates.py` actually
+#: draws. Change it by looking at that figure, not by re-deriving.
+#:
+#: Jittered per site (x0.8-1.2) so the sweep sees a range of eccentricities
+#: rather than one canonical shape.
+SHAPE_DISPLAY_ASPECT = 2.6
 
 #: Amplitude convention for the 2D-template morphologies: ``"peak"`` (default,
 #: consistent with setigen's unit-height f_profiles) or ``"integrated"``. See the
@@ -726,7 +732,7 @@ def _sample_smiley(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Site:
     """
     tchans_per_obs = max(1, int(total_tchans // max(1, n_obs)))
     sigma, r_row, r_col, t_cols = _template_geometry(
-        gen, fchans, tchans_per_obs, (0.30, 0.42))
+        gen, fchans, tchans_per_obs, (0.24, 0.34))
 
     shape = (tchans_per_obs, t_cols)
     cy = 0.5 * (tchans_per_obs - 1)
@@ -777,7 +783,7 @@ def _sample_random_2d(gen, fchans: int, total_tchans: int, n_obs: int = 6) -> Si
     """
     tchans_per_obs = max(1, int(total_tchans // max(1, n_obs)))
     sigma, r_row, r_col, t_cols = _template_geometry(
-        gen, fchans, tchans_per_obs, (0.30, 0.42))
+        gen, fchans, tchans_per_obs, (0.24, 0.34))
 
     n_modes = int(gen.rng.integers(2, 6))
     orders = gen.rng.choice(np.arange(2, 8), size=n_modes, replace=False)

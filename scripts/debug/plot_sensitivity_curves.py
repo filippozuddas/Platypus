@@ -457,6 +457,20 @@ def main():
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     df = pd.concat([pd.read_csv(p) for p in args.csv], ignore_index=True)
+
+    # Shape rows from the superseded canvas geometry (one shape spanning all six
+    # observations, `morphologies_v4`/`v6`) are dropped on sight. They carry the
+    # same morphology names as the current ON-only shapes, so concatenating an
+    # old and a new CSV would silently average two different experiments into one
+    # curve — and the ON/OFF stages reject the canvas variant by construction, so
+    # the average would be meaningless in a specific, hard-to-notice way.
+    if "sig_span" in df.columns:
+        stale = df["sig_span"] == "cadence_canvas"
+        if stale.any():
+            print(f"  dropping {int(stale.sum())} rows with superseded "
+                  f"canvas-span shape geometry")
+            df = df[~stale].reset_index(drop=True)
+
     args.metric = args.metric or ARMS[args.arm]["final"]
     print(f"{len(df)} injections, {df.morphology.nunique()} morphologies, "
           f"SNR {sorted(df.snr.unique())}, arm={args.arm}")
