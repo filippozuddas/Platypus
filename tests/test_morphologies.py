@@ -7,28 +7,25 @@ and every downstream sensitivity number silently becomes "no signal present"
 rather than "signal not detected" — a failure that looks exactly like a real
 negative result. See the module docstring of src/data/morphologies.py.
 
-Two contracts live here, not one. The setigen morphologies are ON-only and must
-leave the OFF observations bit-identical; the canvas morphologies (smiley_face,
-random_2d) are painted across the whole cadence block and must cross the
-observation boundaries instead. Each is checked on its own group — see
-``ON_ONLY_MORPHOLOGIES`` and ``CANVAS_MORPHOLOGIES``.
+All morphologies share one contract: ON-only injection, OFF observations
+returned bit-identical. The 2D-template classes additionally have to fit a
+complete copy of the shape inside a single observation — see
+``SHAPE_MORPHOLOGIES`` and the tests at the bottom.
 """
 
 import numpy as np
 import pytest
 import yaml
 
-from src.data.morphologies import CANVAS_MORPHOLOGIES, MORPHOLOGIES, build_morphology
+from src.data.morphologies import MORPHOLOGIES, SHAPE_MORPHOLOGIES, build_morphology
 
 ON, OFF = (0, 2, 4), (1, 3, 5)
 
-# The canvas morphologies (smiley_face, random_2d) are painted across all six
-# observations, so they appear in the OFF frames BY DESIGN and are excluded from
-# the ON-only contract below. That is not a relaxation of the contract — it is a
-# different one, checked in its own tests further down. See
-# src/data/morphologies.py::DirectArrayMorphology for why the canvas geometry is
-# the only one the (6,64) anomaly map can resolve.
-ON_ONLY_MORPHOLOGIES = tuple(m for m in MORPHOLOGIES if m not in CANVAS_MORPHOLOGIES)
+# Every morphology is ON-only, including the two 2D-template classes: Vishal
+# ruled (2026-07-27) that a shape must be complete inside each ON observation,
+# three per cadence, never split across an ON/OFF boundary. A canvas-wide variant
+# existed briefly and is gone.
+ON_ONLY_MORPHOLOGIES = MORPHOLOGIES
 
 
 @pytest.fixture(scope="module")
@@ -194,22 +191,38 @@ def test_pulsed_cells_of_the_factorial_share_their_timing_distribution(
 
 
 def _occupancy(name, data_cfg, background, seeds=range(8)):
-    """Median (occupied channels, occupied time rows) of an ON observation.
+    """Median (instantaneous channel width, temporal modulation) of an ON observation.
 
-    "Occupied" is measured at 10% of the injection's own peak, so a gaussian
-    frequency profile's tails do not count as extent. Medianed over seeds
-    because both axes are sampled per site.
+    The channel count is taken from the single brightest time row, not from the
+    union over time. For a drifting signal the union is the whole track — at
+    ``drift_median`` 0.3 Hz/s over a 292 s observation that is ~31 channels, an
+    order of magnitude more than the ~2-channel line — so a union-based metric
+    measures drift rate, not frequency extent, and cannot express the factorial's
+    frequency axis at all. It also made this test's verdict depend on the pulse
+    timing: a train that lit only 1-2 time bins per observation swept fewer
+    channels and so looked "narrower" for reasons unrelated to bandwidth.
+
+    Time structure is a modulation index (std/mean of the per-row peak power)
+    rather than a count of occupied rows. At the top of the sampled range — 6
+    pulses in a 16-bin observation at duty 0.6 — the gaps between pulses are
+    narrower than one bin, so "rows above a threshold" saturates at 16 for a pulse
+    train too, and a count cannot express that axis either.
+
+    Widths are measured at 10% of the relevant peak, so a gaussian frequency
+    profile's tails do not count as extent. Medianed over seeds because both axes
+    are sampled per site.
     """
-    cols, rows = [], []
+    cols, mods = [], []
     for seed in seeds:
         inj = build_morphology(name, data_cfg, seed=seed)
         site = inj.sample_site(fchans=1024, total_tchans=96)
         out, _ = inj.inject(background, site, snr=50.0)
         excess = out[ON[0]] - background.astype(np.float32)[ON[0]]
-        mask = excess > 0.1 * excess.max()
-        cols.append(int(mask.any(axis=0).sum()))
-        rows.append(int(mask.any(axis=1).sum()))
-    return float(np.median(cols)), float(np.median(rows))
+        row_peaks = excess.max(axis=1)
+        brightest = excess[int(np.argmax(row_peaks))]
+        cols.append(int((brightest > 0.1 * brightest.max()).sum()))
+        mods.append(float(row_peaks.std() / max(row_peaks.mean(), 1e-12)))
+    return float(np.median(cols)), float(np.median(mods))
 
 
 def test_factorial_separates_frequency_extent_from_time_structure(data_cfg, background):
@@ -220,50 +233,46 @@ def test_factorial_separates_frequency_extent_from_time_structure(data_cfg, back
     these two arms were added. Guarding the factorial here means a later tweak
     to either sampler cannot silently collapse it back into one cell.
     """
-    nb_cont_cols, nb_cont_rows = _occupancy("narrowband_drift", data_cfg, background)
-    nb_puls_cols, nb_puls_rows = _occupancy("narrowband_pulsed", data_cfg, background)
-    wb_cont_cols, wb_cont_rows = _occupancy("wideband_continuous", data_cfg, background)
-    wb_puls_cols, wb_puls_rows = _occupancy("wideband_pulsed", data_cfg, background)
+    nb_cont_cols, nb_cont_mod = _occupancy("narrowband_drift", data_cfg, background)
+    nb_puls_cols, nb_puls_mod = _occupancy("narrowband_pulsed", data_cfg, background)
+    wb_cont_cols, wb_cont_mod = _occupancy("wideband_continuous", data_cfg, background)
+    wb_puls_cols, wb_puls_mod = _occupancy("wideband_pulsed", data_cfg, background)
 
-    # Frequency axis: wideband occupies far more channels, at both time structures.
-    assert wb_cont_cols > 10 * nb_cont_cols
-    assert wb_puls_cols > 10 * nb_puls_cols
-    # Time axis: a pulse train leaves gaps, a continuous signal does not.
-    assert nb_cont_rows == background.shape[1]
-    assert wb_cont_rows == background.shape[1]
-    assert nb_puls_rows < nb_cont_rows
-    assert wb_puls_rows < wb_cont_rows
+    # Frequency axis: wideband is far wider instantaneously, at both time structures.
+    assert wb_cont_cols > 10 * nb_cont_cols, f"{wb_cont_cols} vs {nb_cont_cols}"
+    assert wb_puls_cols > 10 * nb_puls_cols, f"{wb_puls_cols} vs {nb_puls_cols}"
+    # Time axis: a pulse train modulates its amplitude, a continuous signal does
+    # not. The margin is modest rather than large because the continuous
+    # narrowband class samples a scintillating time profile half the time, which
+    # puts a floor on its own modulation — the axis is still separated, just not
+    # by an order of magnitude.
+    assert nb_puls_mod > 1.3 * nb_cont_mod, f"{nb_puls_mod:.3f} vs {nb_cont_mod:.3f}"
+    assert wb_puls_mod > 1.3 * wb_cont_mod, f"{wb_puls_mod:.3f} vs {wb_cont_mod:.3f}"
+    assert nb_puls_mod > 0.25 and wb_puls_mod > 0.25
 
 
-@pytest.mark.parametrize("name", CANVAS_MORPHOLOGIES)
+@pytest.mark.parametrize("name", SHAPE_MORPHOLOGIES)
 @pytest.mark.parametrize("seed", range(12))
-def test_canvas_shape_crosses_observation_boundaries(name, data_cfg, background, seed):
-    """A canvas shape must span several observations, OFF frames included.
+def test_shape_is_complete_in_every_on_observation(name, data_cfg, background, seed):
+    """One whole copy of the shape per ON observation, identical in all three.
 
-    This is the opposite of the ON-only contract, and it is deliberate: a shape
-    confined to one observation occupies exactly one row of the (6,64) anomaly
-    map, so the model cannot resolve its vertical structure at all. If this ever
-    narrows to a single observation, the shape has silently gone back to being a
-    bandwidth test wearing a morphology's name.
-
-    Not *every* observation: the smaller sampled radii span 4 of 6, which is
-    fine. What must hold is that the span is multi-observation and that OFF
-    frames are among them — the latter being why these morphologies are
-    scorer-level tests and are excluded from end-to-end survival reporting.
+    Vishal, 2026-07-27: *"one smiley face per ON, so a total of three of them on
+    all three"* — not one shape split across the cadence. A version that differed
+    between ON observations, or that leaked into an OFF, would be a different
+    experiment wearing the same name.
     """
     inj = build_morphology(name, data_cfg, seed=seed)
     site = inj.sample_site(fchans=1024, total_tchans=96)
     out, _ = inj.inject(background, site, snr=30.0)
 
-    expected = background.astype(np.float32)
-    hit = [i for i in range(background.shape[0])
-           if float((out[i] - expected[i]).max()) > 0]
-    assert len(hit) >= 3, f"{name}: spans only {len(hit)} observation(s) at seed {seed}"
-    assert any(i in OFF for i in hit), f"{name}: no OFF observation reached"
+    excess = [out[i] - background.astype(np.float32)[i] for i in ON]
+    for other in excess[1:]:
+        np.testing.assert_allclose(excess[0], other, rtol=0, atol=1e-5)
+    assert float(excess[0].max()) > 0
 
 
-@pytest.mark.parametrize("name", CANVAS_MORPHOLOGIES)
-def test_canvas_rows_are_not_all_identical(name, data_cfg, background):
+@pytest.mark.parametrize("name", SHAPE_MORPHOLOGIES)
+def test_shape_rows_are_not_all_identical(name, data_cfg, background):
     """Vertical structure must actually exist — the point of the canvas geometry.
 
     A shape whose rows were all equal would be a vertical bar, indistinguishable
@@ -279,7 +288,7 @@ def test_canvas_rows_are_not_all_identical(name, data_cfg, background):
     assert per_row_mass.std() > 0.05 * per_row_mass.mean()
 
 
-@pytest.mark.parametrize("name", CANVAS_MORPHOLOGIES)
+@pytest.mark.parametrize("name", SHAPE_MORPHOLOGIES)
 def test_amplitude_follows_the_declared_convention(name, data_cfg, background):
     """The SNR axis must mean what ``info["snr_convention"]`` says it means.
 
@@ -301,15 +310,19 @@ def test_amplitude_follows_the_declared_convention(name, data_cfg, background):
             info["intensity"] * total_tchans, rel=1e-3)
 
 
-@pytest.mark.parametrize("name", CANVAS_MORPHOLOGIES)
+@pytest.mark.parametrize("name", SHAPE_MORPHOLOGIES)
 @pytest.mark.parametrize("seed", range(24))
-def test_canvas_template_fits_the_block(name, data_cfg, seed):
-    """No clipping at the canvas edge or the band edge, for any draw."""
+def test_shape_template_fits_one_observation(name, data_cfg, seed):
+    """No clipping at the observation edge or the band edge, for any draw.
+
+    An ON observation is 16 time bins. A shape sampled taller would be truncated
+    into a pair of bars — a different morphology than the CSV claims.
+    """
     inj = build_morphology(name, data_cfg, seed=seed)
     site = inj.sample_site(fchans=1024, total_tchans=96)
     template = site.payload["template"]
 
-    assert template.shape[0] == 96
+    assert template.shape[0] == 16
     assert 0 <= site.payload["start_channel"]
     assert site.payload["start_channel"] + template.shape[1] <= 1024
     # Structure must be interior: mass on the first/last row means the shape was
@@ -320,10 +333,10 @@ def test_canvas_template_fits_the_block(name, data_cfg, seed):
     assert template.max() > 0.5
     # It must span several map rows, which is the entire reason for the change:
     # 16 rows = 1 map row, and the old geometry never exceeded that.
-    # A random blob's Fourier perturbation can pull its vertical radius in, so the
-    # bar is "more than one map row" (16), not the nominal height.
+    # The shape must use most of the observation it is given: a tiny blob in the
+    # middle of 16 rows would be a point source, not a 2D morphology.
     lit = np.where(template.max(axis=1) > 0.1)[0]
-    assert (lit[-1] - lit[0]) > 24, f"{name}: spans ~1 anomaly-map row at seed {seed}"
+    assert (lit[-1] - lit[0]) >= 6, f"{name}: only {lit[-1]-lit[0]} rows tall at seed {seed}"
 
 
 def test_unknown_morphology_names_alternatives(data_cfg):
