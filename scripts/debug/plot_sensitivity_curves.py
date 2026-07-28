@@ -259,13 +259,18 @@ def plot_detection(df, arm):
                         for s, r, a, b in zip(snrs, vals, lo, hi)]
 
         # Direct labels at the right edge: with two series they replace reading
-        # values off a shared legend and a gridline.
-        for vals, key in ((model, "model"), (survives, "survives")):
+        # values off a shared legend and a gridline. When the two lines converge
+        # the labels are pushed apart vertically — overlapping them turns "100"
+        # and "99" into an unreadable smear, which is worse than no label.
+        gap = model[-1] - survives[-1]
+        offsets = (6, -6) if abs(gap) < 8 else (0, 0)
+        for vals, key, dy in ((model, "model", offsets[0]),
+                              (survives, "survives", offsets[1])):
             ax.annotate(f"{vals[-1]:.0f}", xy=(snrs[-1], vals[-1]),
-                        xytext=(4, 0), textcoords="offset points",
+                        xytext=(5, dy), textcoords="offset points",
                         color=DETECTION_COLORS[key], fontsize=8.5,
                         va="center", fontweight="bold")
-        style_axis(ax, "injected SNR", "of injections (%)", panel_title(morph))
+        style_axis(ax, "injected SNR", "% of injections", panel_title(morph))
         ax.set_xlim(min(snrs) - 1, max(snrs) + 6)
 
     handles, labels = axes[0].get_legend_handles_labels()
@@ -318,7 +323,7 @@ def plot_cascade(df, arm):
                          "n": int((sub.snr == s).sum())}
                         for s, r, a, b in zip(snrs, vals, lo, hi)]
 
-        style_axis(ax, "injected SNR", "of injections (%)", panel_title(morph))
+        style_axis(ax, "injected SNR", "% of injections", panel_title(morph))
 
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=len(labels), frameon=False,
