@@ -23,35 +23,36 @@ def add_obs_dividers(ax, n_rows: int, n_obs: int = 6, color: str = "white",
 
 
 def add_on_off_labels(ax, n_rows: int, n_obs: int = 6, on_rows=(0, 2, 4),
-                       off_rows=(1, 3, 5), color: str = "white", fontsize: int = 7):
+                       off_rows=(1, 3, 5), on_color: str = "limegreen",
+                       off_color: str = "red", fontsize: int = 6):
     """Annotate each of the ``n_obs`` stacked-observation bands with "ON"/"OFF",
-    just outside the right edge of ``ax``.
+    inside ``ax`` at the top-left corner of each band.
 
     ``on_rows``/``off_rows`` are observation indices within the ABACAD cadence
     (same convention as ``src.search.candidates.on_off_contrast``:
     ``(0, 2, 4)``=ON, ``(1, 3, 5)``=OFF). ``n_rows`` is the axis's total row
     count — pass ``frame.tchans`` for a full-resolution waterfall panel (label
-    centered on each ``n_rows // n_obs``-bin band) or ``nh`` for UDMA's native
-    (nh, nw) anomaly-map grid, where each row already is one observation
-    (``n_obs`` should equal ``nh`` in that case). No-op if ``n_rows`` doesn't
-    divide evenly by ``n_obs``.
+    at the top of each ``n_rows // n_obs``-bin band) or ``nh`` for UDMA's
+    native (nh, nw) anomaly-map grid, where each row already is one
+    observation (``n_obs`` should equal ``nh`` in that case). Small font and a
+    corner placement keep the label from obscuring candidate signal in the
+    band. No-op if ``n_rows`` doesn't divide evenly by ``n_obs``.
     """
     if n_rows % n_obs != 0:
         return
     bins_per_obs = n_rows // n_obs
     for obs_idx in range(n_obs):
         if obs_idx in on_rows:
-            label = "ON"
+            label, color = "ON", on_color
         elif obs_idx in off_rows:
-            label = "OFF"
+            label, color = "OFF", off_color
         else:
             continue
-        y_center = obs_idx * bins_per_obs + bins_per_obs / 2 - 0.5
-        ax.text(1.01, y_center, label, transform=ax.get_yaxis_transform(),
-                va="center", ha="left", fontsize=fontsize, color=color,
-                bbox=dict(boxstyle="round,pad=0.15", facecolor="black",
-                          alpha=0.6, edgecolor="none"),
-                clip_on=False)
+        y_top = obs_idx * bins_per_obs - 0.5
+        ax.text(0.01, y_top + bins_per_obs * 0.08, label,
+                transform=ax.get_yaxis_transform(),
+                va="top", ha="left", fontsize=fontsize, color=color,
+                fontweight="bold", clip_on=True)
 
 
 def upsample_map_bilinear(amap: np.ndarray, target_shape) -> np.ndarray:
