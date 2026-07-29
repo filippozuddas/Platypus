@@ -53,7 +53,7 @@ def overlay_anomaly_map(ax, base_img: np.ndarray, amap: np.ndarray, cmap: str = 
 
 
 def plot_candidate(original, reconstruction, score, sigma, method, cad_idx,
-                    target, f_start, df, fch1_mhz=0.0, anomaly_map=None, n_obs=6,
+                    target, f_start, df, fch1_mhz=0.0, obs_date="", anomaly_map=None, n_obs=6,
                     show_overlay=True):
     """Build (but don't save) the original|reconstruction|error figure for one
     candidate; caller decides whether to write it to PNG, a per-cadence PDF,
@@ -73,14 +73,22 @@ def plot_candidate(original, reconstruction, score, sigma, method, cad_idx,
     resolution — the two full-resolution panels (``original``,
     ``reconstruction``/residual) plus the bilinear anomaly-map overlay.
 
-    ``f_start`` is a channel index into the source file's frequency axis, not
-    a frequency — the suptitle's "Center freq" is ``fch1_mhz`` (the file
-    header's absolute sky frequency at channel 0) plus the window's own
-    offset from it, so ``fch1_mhz`` must be passed for the label to be
-    meaningful (0 = falls back to reporting the in-file offset, e.g. ~100 MHz
-    for a mid-file window, which is not a real sky frequency). ``df`` should
-    be the file header's signed ``foff`` (Hz/channel), not just a channel-
-    width magnitude, so the direction of increasing channel index is correct.
+    Args:
+        original: (time, freq) waterfall array.
+        reconstruction: (time, freq) reconstructed array (None for anomaly_map backbones).
+        score: scalar anomaly score for the suptitle.
+        sigma: score's significance in MAD-sigma (None to omit from suptitle).
+        method: scoring method name (e.g. "topk", "recon").
+        cad_idx: cadence index for the suptitle.
+        target: target source name.
+        f_start: channel index into the source file's frequency axis.
+        df: file header's signed ``foff`` (Hz/channel).
+        fch1_mhz: file header's absolute sky frequency at channel 0 (MHz).
+            Passed to suptitle as "Obs start freq"; 0 = omit.
+        obs_date: observation date (YYYYMMDD format) for the suptitle; "" = omit.
+        anomaly_map: (nh, nw) anomaly map from UDMA (shown if reconstruction is None).
+        n_obs: number of observations in cadence (for divider lines).
+        show_overlay: if True, show bilinear-resampled anomaly map overlay.
     """
     n_rows = original.shape[0]
     vmin, vmax = np.percentile(original, [1, 99])
@@ -124,14 +132,12 @@ def plot_candidate(original, reconstruction, score, sigma, method, cad_idx,
 
     fchans = original.shape[-1]
     f_center_mhz = fch1_mhz + (f_start + fchans / 2) * df / 1e6
-    bw_hz = abs(df) * fchans
-    bw_label = f"{bw_hz / 1e3:.3f} kHz" if bw_hz < 1e6 else f"{bw_hz / 1e6:.4f} MHz"
     score_line = f"{method} score={score:.4f}"
     if sigma is not None:
         score_line += f" ({sigma:.1f}s)"
     fig.suptitle(
-        f"Candidate: cad={cad_idx} ({target})  f_start={f_start} (channel)\n"
-        f"Center freq={f_center_mhz:.6f} MHz  Bandwidth={bw_label}\n"
+        f"Candidate: cad={cad_idx} ({target})  f_start={f_start} (channel)  date={obs_date}\n"
+        f"Obs start freq={fch1_mhz:.1f} MHz  Center freq={f_center_mhz:.6f} MHz\n"
         f"{score_line}",
         fontsize=11,
     )

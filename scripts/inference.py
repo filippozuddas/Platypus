@@ -588,6 +588,7 @@ def main():
                     score=score, sigma=sigma, method=method,
                     cad_idx=cad_idx, target=target_name,
                     f_start=fs, df=freq_step_hz, fch1_mhz=fch1_mhz,
+                    obs_date=meta["date"],
                     anomaly_map=amap,
                 )
                 if pdf is not None:

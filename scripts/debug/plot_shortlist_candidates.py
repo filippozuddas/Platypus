@@ -126,11 +126,13 @@ def main():
     # and stripped of sign) — needed so f_center_mhz below is an absolute sky
     # frequency, not just an in-file channel offset (see plot_candidate).
     fch1_mhz, foff_hz = 0.0, 0.0
+    obs_date = ""
     for obs_path in obs_paths:
         try:
             meta = inf.read_cadence_meta(obs_path)
             fch1_mhz = meta["fch1_mhz"]
             foff_hz = meta["foff_mhz"] * 1e6
+            obs_date = meta["date"]
             if target is None:
                 target = meta["source"]
             break
@@ -239,6 +241,7 @@ def main():
                 original=snippet, reconstruction=recon, score=score, sigma=None,
                 method=method, cad_idx=cad_idx, target=target or "unknown",
                 f_start=fs, df=freq_step_hz, fch1_mhz=fch1_mhz,
+                obs_date=obs_date,
                 anomaly_map=amap, show_overlay=False,
             )
         else:
