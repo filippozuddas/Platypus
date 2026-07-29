@@ -157,7 +157,7 @@ def plot_candidate(original, reconstruction, score, sigma, method, cad_idx,
         score_line += f" ({sigma:.1f}s)"
     fig.suptitle(
         f"Candidate: cad={cad_idx} ({target})  date={date_label}\n"
-        f"Obs start freq={f_obs_start_mhz:.1f} MHz  Center freq={f_center_mhz:.6f} MHz\n"
+        f"Obs start freq={f_obs_start_mhz:.6f} MHz  Center freq of snippet={f_center_mhz:.6f} MHz\n"
         f"{score_line}",
         fontsize=11,
     )
