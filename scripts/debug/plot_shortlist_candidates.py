@@ -163,6 +163,7 @@ def main():
     fchans, tchans = frame["fchans"], frame["tchans"]
     downsample_factor = frame.get("downsample_factor", 1)
     df = data_cfg["raw"]["df"]
+    nchans_total = data_cfg["raw"]["nchans"]
     freq_step_hz = foff_hz if foff_hz else df
     method_bp = preproc.get("bandpass_method", "polynomial")
     poly_degree = preproc.get("poly_degree", 3)
@@ -241,7 +242,7 @@ def main():
                 original=snippet, reconstruction=recon, score=score, sigma=None,
                 method=method, cad_idx=cad_idx, target=target or "unknown",
                 f_start=fs, df=freq_step_hz, fch1_mhz=fch1_mhz,
-                obs_date=obs_date,
+                nchans_total=nchans_total, obs_date=obs_date,
                 anomaly_map=amap, show_overlay=False,
             )
         else:

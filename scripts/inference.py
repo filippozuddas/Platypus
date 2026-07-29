@@ -216,6 +216,7 @@ def main():
     stride = frame.get("stride_infer", fchans // 2)
     downsample_factor = frame.get("downsample_factor", 1)
     df = data_cfg["raw"]["df"]
+    nchans_total = data_cfg["raw"]["nchans"]
     input_shape = (tchans, fchans, 1)
 
     with open(args.model_config) as f:
@@ -588,7 +589,7 @@ def main():
                     score=score, sigma=sigma, method=method,
                     cad_idx=cad_idx, target=target_name,
                     f_start=fs, df=freq_step_hz, fch1_mhz=fch1_mhz,
-                    obs_date=meta["date"],
+                    nchans_total=nchans_total, obs_date=meta["date"],
                     anomaly_map=amap,
                 )
                 if pdf is not None:

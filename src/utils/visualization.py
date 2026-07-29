@@ -53,8 +53,8 @@ def overlay_anomaly_map(ax, base_img: np.ndarray, amap: np.ndarray, cmap: str = 
 
 
 def plot_candidate(original, reconstruction, score, sigma, method, cad_idx,
-                    target, f_start, df, fch1_mhz=0.0, obs_date="", anomaly_map=None, n_obs=6,
-                    show_overlay=True):
+                    target, f_start, df, fch1_mhz=0.0, nchans_total=0, obs_date="",
+                    anomaly_map=None, n_obs=6, show_overlay=True):
     """Build (but don't save) the original|reconstruction|error figure for one
     candidate; caller decides whether to write it to PNG, a per-cadence PDF,
     or both.
@@ -81,11 +81,25 @@ def plot_candidate(original, reconstruction, score, sigma, method, cad_idx,
         method: scoring method name (e.g. "topk", "recon").
         cad_idx: cadence index for the suptitle.
         target: target source name.
-        f_start: channel index into the source file's frequency axis.
-        df: file header's signed ``foff`` (Hz/channel).
-        fch1_mhz: file header's absolute sky frequency at channel 0 (MHz).
-            Passed to suptitle as "Obs start freq"; 0 = omit.
-        obs_date: observation date (YYYYMMDD format) for the suptitle; "" = omit.
+        f_start: channel index into the source file's frequency axis; used
+            (not shown directly) to compute "Center freq" in the suptitle.
+        df: file header's signed ``foff`` (Hz/channel) — negative for the
+            typical filterbank convention where channel 0 is the top of the
+            band and frequency decreases with increasing channel index, so
+            "Center freq" can be lower than the band's start frequency.
+        fch1_mhz: file header's absolute sky frequency at channel 0 (MHz);
+            0 = channel-0 freq unknown, "Center freq" falls back to an
+            in-file offset.
+        nchans_total: total channel count of the source file (e.g.
+            ``data_cfg["raw"]["nchans"]``, fixed per product), used with
+            ``fch1_mhz``/``df`` to find the band's low-frequency edge for
+            the suptitle's "Obs start freq" (the lower of ``fch1_mhz`` and
+            ``fch1_mhz + nchans_total*df``, since ``fch1_mhz`` alone is the
+            top of the band when ``df`` is negative). 0 = suptitle falls
+            back to showing ``fch1_mhz`` directly.
+        obs_date: observation date, ``YYYYMMDD`` (as returned by
+            ``read_cadence_meta``); reformatted to ``YYYY-MM-DD`` in the
+            suptitle. "" = omit.
         anomaly_map: (nh, nw) anomaly map from UDMA (shown if reconstruction is None).
         n_obs: number of observations in cadence (for divider lines).
         show_overlay: if True, show bilinear-resampled anomaly map overlay.
@@ -132,12 +146,18 @@ def plot_candidate(original, reconstruction, score, sigma, method, cad_idx,
 
     fchans = original.shape[-1]
     f_center_mhz = fch1_mhz + (f_start + fchans / 2) * df / 1e6
+    if nchans_total:
+        f_other_edge_mhz = fch1_mhz + nchans_total * df / 1e6
+        f_obs_start_mhz = min(fch1_mhz, f_other_edge_mhz)
+    else:
+        f_obs_start_mhz = fch1_mhz
+    date_label = f"{obs_date[:4]}-{obs_date[4:6]}-{obs_date[6:8]}" if len(obs_date) == 8 else obs_date
     score_line = f"{method} score={score:.4f}"
     if sigma is not None:
         score_line += f" ({sigma:.1f}s)"
     fig.suptitle(
-        f"Candidate: cad={cad_idx} ({target})  f_start={f_start} (channel)  date={obs_date}\n"
-        f"Obs start freq={fch1_mhz:.1f} MHz  Center freq={f_center_mhz:.6f} MHz\n"
+        f"Candidate: cad={cad_idx} ({target})  date={date_label}\n"
+        f"Obs start freq={f_obs_start_mhz:.1f} MHz  Center freq={f_center_mhz:.6f} MHz\n"
         f"{score_line}",
         fontsize=11,
     )
