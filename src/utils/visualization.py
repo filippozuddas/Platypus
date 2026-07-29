@@ -48,7 +48,10 @@ def add_on_off_labels(ax, n_rows: int, n_obs: int = 6, on_rows=(0, 2, 4),
             continue
         y_center = obs_idx * bins_per_obs + bins_per_obs / 2 - 0.5
         ax.text(1.01, y_center, label, transform=ax.get_yaxis_transform(),
-                va="center", ha="left", fontsize=fontsize, color=color)
+                va="center", ha="left", fontsize=fontsize, color=color,
+                bbox=dict(boxstyle="round,pad=0.15", facecolor="black",
+                          alpha=0.6, edgecolor="none"),
+                clip_on=False)
 
 
 def upsample_map_bilinear(amap: np.ndarray, target_shape) -> np.ndarray:
