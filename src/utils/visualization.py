@@ -23,8 +23,8 @@ def add_obs_dividers(ax, n_rows: int, n_obs: int = 6, color: str = "white",
 
 
 def add_on_off_labels(ax, n_rows: int, n_obs: int = 6, on_rows=(0, 2, 4),
-                       off_rows=(1, 3, 5), on_color: str = "limegreen",
-                       off_color: str = "red", fontsize: int = 6):
+                       off_rows=(1, 3, 5), on_color: str = "white",
+                       off_color: str = "white", fontsize: int = 6):
     """Annotate each of the ``n_obs`` stacked-observation bands with "ON"/"OFF",
     inside ``ax`` at the top-left corner of each band.
 
