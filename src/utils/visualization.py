@@ -22,6 +22,35 @@ def add_obs_dividers(ax, n_rows: int, n_obs: int = 6, color: str = "white",
         ax.axhline(row - 0.5, color=color, lw=lw, alpha=alpha, ls="-")
 
 
+def add_on_off_labels(ax, n_rows: int, n_obs: int = 6, on_rows=(0, 2, 4),
+                       off_rows=(1, 3, 5), color: str = "white", fontsize: int = 7):
+    """Annotate each of the ``n_obs`` stacked-observation bands with "ON"/"OFF",
+    just outside the right edge of ``ax``.
+
+    ``on_rows``/``off_rows`` are observation indices within the ABACAD cadence
+    (same convention as ``src.search.candidates.on_off_contrast``:
+    ``(0, 2, 4)``=ON, ``(1, 3, 5)``=OFF). ``n_rows`` is the axis's total row
+    count — pass ``frame.tchans`` for a full-resolution waterfall panel (label
+    centered on each ``n_rows // n_obs``-bin band) or ``nh`` for UDMA's native
+    (nh, nw) anomaly-map grid, where each row already is one observation
+    (``n_obs`` should equal ``nh`` in that case). No-op if ``n_rows`` doesn't
+    divide evenly by ``n_obs``.
+    """
+    if n_rows % n_obs != 0:
+        return
+    bins_per_obs = n_rows // n_obs
+    for obs_idx in range(n_obs):
+        if obs_idx in on_rows:
+            label = "ON"
+        elif obs_idx in off_rows:
+            label = "OFF"
+        else:
+            continue
+        y_center = obs_idx * bins_per_obs + bins_per_obs / 2 - 0.5
+        ax.text(1.01, y_center, label, transform=ax.get_yaxis_transform(),
+                va="center", ha="left", fontsize=fontsize, color=color)
+
+
 def upsample_map_bilinear(amap: np.ndarray, target_shape) -> np.ndarray:
     """Bilinearly upsample a native (nh,nw) patch-grid map to ``target_shape`` pixels.
 
@@ -117,6 +146,7 @@ def plot_candidate(original, reconstruction, score, sigma, method, cad_idx,
     axes[0].set_ylabel("Time bin")
     axes[0].set_xlabel("Freq channel")
     add_obs_dividers(axes[0], n_rows, n_obs)
+    add_on_off_labels(axes[0], n_rows, n_obs)
     plt.colorbar(im0, ax=axes[0], fraction=0.046)
 
     if reconstruction is not None:
@@ -125,6 +155,7 @@ def plot_candidate(original, reconstruction, score, sigma, method, cad_idx,
         axes[1].set_title("Reconstruction")
         axes[1].set_xlabel("Freq channel")
         add_obs_dividers(axes[1], n_rows, n_obs)
+        add_on_off_labels(axes[1], n_rows, n_obs)
         plt.colorbar(im1, ax=axes[1], fraction=0.046)
 
         error = np.abs(original - reconstruction)
@@ -132,17 +163,20 @@ def plot_candidate(original, reconstruction, score, sigma, method, cad_idx,
         axes[2].set_title("Residual |orig - recon|")
         axes[2].set_xlabel("Freq channel")
         add_obs_dividers(axes[2], n_rows, n_obs)
+        add_on_off_labels(axes[2], n_rows, n_obs)
         plt.colorbar(im2, ax=axes[2], fraction=0.046)
     else:
         im1 = axes[1].imshow(anomaly_map, aspect="auto", origin="upper", cmap="viridis")
         axes[1].set_title("anomaly_map (UDMA, native (nh,nw) grid)")
         axes[1].set_xlabel("Freq patch col")
         axes[1].set_ylabel("Time patch row")
+        add_on_off_labels(axes[1], anomaly_map.shape[0], anomaly_map.shape[0])
         plt.colorbar(im1, ax=axes[1], fraction=0.046)
         if show_overlay:
             overlay_anomaly_map(axes[2], original, anomaly_map,
                                  title="anomaly_map (bilinear overlay)")
             add_obs_dividers(axes[2], n_rows, n_obs)
+            add_on_off_labels(axes[2], n_rows, n_obs)
 
     fchans = original.shape[-1]
     f_center_mhz = fch1_mhz + (f_start + fchans / 2) * df / 1e6
