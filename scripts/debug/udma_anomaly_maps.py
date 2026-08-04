@@ -18,7 +18,7 @@ grid via the teacher's global attention (the Q1 risk: "se le mappe risultano
 diffuse -> v2: teacher CNN a receptive field piccolo").
 
 Usage (server):
-    PYTHONPATH=/path/to/BL-Exotica-AD python scripts/debug/udma_anomaly_maps.py \\
+    PYTHONPATH=/path/to/Platypus python scripts/debug/udma_anomaly_maps.py \\
         --checkpoint outputs/20260705_224358_e8411e9/checkpoints/epoch=029-val_loss=0.6381.ckpt \\
         --model_config configs/model/udma.yaml \\
         --cache /path/to/data/processed/cache_gbt_fine \\

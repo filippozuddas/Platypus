@@ -62,5 +62,5 @@ dataset:
   # for why 2200 not the 18000 default: between-cadence diversity > within-cadence redundancy).
   # Old SRT-derived cache deleted 2026-07-06 to make room (was blocking build_datasets() from
   # ever seeing this real cache, since it silently wins whenever cache_dir exists on disk).
-  cache_dir: /content/nvme_esterno/filippo/BL-Exotica-AD/data/processed/cache_gbt_fine_exotica  # directory with train.npy, val.npy, meta.json
+  cache_dir: /content/nvme_esterno/filippo/Platypus/data/processed/cache_gbt_fine_exotica  # directory with train.npy, val.npy, meta.json
   seed: 42

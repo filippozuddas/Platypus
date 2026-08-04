@@ -26,7 +26,7 @@ For a large pool of real background probe windows (no injection), this script:
      the heterogeneity hypothesis is supported.
 
 Usage (server):
-    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/BL-Exotica-AD \\
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/Platypus \\
     python scripts/debug/off_row_heterogeneity_test.py \\
         --checkpoint outputs/training/20260707_093113_6d0d1ba/checkpoints/last.ckpt \\
         --cadence_list data/raw/gbt_0000_heldout_cadences.txt \\

@@ -1,6 +1,6 @@
 # Documentation
 
-Design rationale and results for BL-Exotica-AD.
+Design rationale and results for Platypus.
 
 Code carries API documentation only. The *why* — rejected alternatives,
 hand-validated numbers, and experiments worth not repeating — lives here.
@@ -15,6 +15,7 @@ no dated correspondence and no superseded material in this directory.
 | 03 | [Teacher localization](03_teacher-localization.md) | Why is the teacher domain-matched instead of paper-faithful? |
 | 04 | [Candidate filtering](04_candidate-filtering.md) | How does a scored snippet become a candidate a human looks at? |
 | 05 | [Results and limitations](05_results.md) | Does it work, and what is still broken? |
+| 06 | [Threshold audit](06_threshold-audit.md) | Is the pipeline actually searching everything it scans? |
 
 **If you only read one:** [`01_scoring-history.md`](01_scoring-history.md). Five
 scorer families failed before the current one worked, and that history explains

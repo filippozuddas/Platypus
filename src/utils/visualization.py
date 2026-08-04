@@ -68,18 +68,23 @@ def upsample_map_bilinear(amap: np.ndarray, target_shape) -> np.ndarray:
 
 
 def overlay_anomaly_map(ax, base_img: np.ndarray, amap: np.ndarray, cmap: str = "inferno",
-                         alpha: float = 0.45, title: str = None, origin: str = "upper"):
+                         alpha: float = 0.45, title: str = None, origin: str = "upper",
+                         extent=None):
     """Plot ``base_img`` in grayscale with the bilinearly-upsampled ``amap`` overlaid.
 
     ``amap`` is the native (nh,nw) patch-grid anomaly map (e.g. UDMA's fused
     map_cob); it is upsampled to ``base_img.shape`` purely for this overlay.
     ``origin`` must match the convention used for ``base_img`` elsewhere in the
     same figure, or the overlay will be flipped relative to its neighbors.
+    ``extent`` (left, right, bottom, top), forwarded to both ``imshow`` calls,
+    calibrates the x-axis to real frequency (MHz) instead of channel index —
+    see ``plot_candidate``.
     """
     up = upsample_map_bilinear(amap, base_img.shape)
     vmin, vmax = np.percentile(base_img, [1, 99])
-    ax.imshow(base_img, aspect="auto", origin=origin, cmap="gray", vmin=vmin, vmax=vmax)
-    im = ax.imshow(up, aspect="auto", origin=origin, cmap=cmap, alpha=alpha)
+    ax.imshow(base_img, aspect="auto", origin=origin, cmap="gray", vmin=vmin, vmax=vmax,
+              extent=extent)
+    im = ax.imshow(up, aspect="auto", origin=origin, cmap=cmap, alpha=alpha, extent=extent)
     if title:
         ax.set_title(title)
     return im
@@ -138,34 +143,53 @@ def plot_candidate(original, reconstruction, score, sigma, method, cad_idx,
         show_overlay: if True, show bilinear-resampled anomaly map overlay.
     """
     n_rows = original.shape[0]
+    fchans = original.shape[-1]
     vmin, vmax = np.percentile(original, [1, 99])
+
+    # Real-frequency (MHz) x-axis for every full-resolution panel, so the
+    # "Center freq of snippet" printed in the suptitle is visibly the
+    # midpoint of the plotted band rather than a disconnected number next to
+    # a bare channel-index axis (channel-axis alone was the source of
+    # Vishal's "doesn't look like the center" confusion, 2026-07-30).
+    # extent=(left, right, bottom, top); left/right are the snippet's low-
+    # and high-channel-index edges converted to MHz — reversed automatically
+    # when df<0, so the axis direction always matches the sky.
+    freq_axis = fch1_mhz != 0.0 and df != 0.0
+    if freq_axis:
+        f_edge0_mhz = fch1_mhz + f_start * df / 1e6
+        f_edge1_mhz = fch1_mhz + (f_start + fchans) * df / 1e6
+        extent = (f_edge0_mhz, f_edge1_mhz, n_rows - 0.5, -0.5)
+        freq_xlabel = "Frequency (MHz)"
+    else:
+        extent = None
+        freq_xlabel = "Freq channel"
 
     show_overlay = show_overlay or reconstruction is not None
     n_panels = 3 if show_overlay else 2
     fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5))
 
     im0 = axes[0].imshow(original, aspect="auto", origin="upper",
-                          vmin=vmin, vmax=vmax, cmap="viridis")
+                          vmin=vmin, vmax=vmax, cmap="viridis", extent=extent)
     axes[0].set_title("Original")
     axes[0].set_ylabel("Time bin")
-    axes[0].set_xlabel("Freq channel")
+    axes[0].set_xlabel(freq_xlabel)
     add_obs_dividers(axes[0], n_rows, n_obs)
     add_on_off_labels(axes[0], n_rows, n_obs)
     plt.colorbar(im0, ax=axes[0], fraction=0.046)
 
     if reconstruction is not None:
         im1 = axes[1].imshow(reconstruction, aspect="auto", origin="upper",
-                              vmin=vmin, vmax=vmax, cmap="viridis")
+                              vmin=vmin, vmax=vmax, cmap="viridis", extent=extent)
         axes[1].set_title("Reconstruction")
-        axes[1].set_xlabel("Freq channel")
+        axes[1].set_xlabel(freq_xlabel)
         add_obs_dividers(axes[1], n_rows, n_obs)
         add_on_off_labels(axes[1], n_rows, n_obs)
         plt.colorbar(im1, ax=axes[1], fraction=0.046)
 
         error = np.abs(original - reconstruction)
-        im2 = axes[2].imshow(error, aspect="auto", origin="upper", cmap="hot")
+        im2 = axes[2].imshow(error, aspect="auto", origin="upper", cmap="hot", extent=extent)
         axes[2].set_title("Residual |orig - recon|")
-        axes[2].set_xlabel("Freq channel")
+        axes[2].set_xlabel(freq_xlabel)
         add_obs_dividers(axes[2], n_rows, n_obs)
         add_on_off_labels(axes[2], n_rows, n_obs)
         plt.colorbar(im2, ax=axes[2], fraction=0.046)
@@ -178,11 +202,11 @@ def plot_candidate(original, reconstruction, score, sigma, method, cad_idx,
         plt.colorbar(im1, ax=axes[1], fraction=0.046)
         if show_overlay:
             overlay_anomaly_map(axes[2], original, anomaly_map,
-                                 title="anomaly_map (bilinear overlay)")
+                                 title="anomaly_map (bilinear overlay)", extent=extent)
+            axes[2].set_xlabel(freq_xlabel)
             add_obs_dividers(axes[2], n_rows, n_obs)
             add_on_off_labels(axes[2], n_rows, n_obs)
 
-    fchans = original.shape[-1]
     f_center_mhz = fch1_mhz + (f_start + fchans / 2) * df / 1e6
     if nchans_total:
         f_other_edge_mhz = fch1_mhz + nchans_total * df / 1e6

@@ -19,7 +19,7 @@ Usage
 -----
     # preferred — uses .npy cache with memory-mapping
     PYTHONPATH=. python scripts/debug/rfi_composition_analysis.py \\
-        --cache /home/acabras/data/nvme_esterno/filippo/BL-Exotica-AD/data/processed/cache_gbt_fine \\
+        --cache /home/acabras/data/nvme_esterno/filippo/Platypus/data/processed/cache_gbt_fine \\
         --data_config configs/data/gbt_fine.yaml \\
         --split train \\
         --n_samples 3000 \\

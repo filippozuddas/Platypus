@@ -38,9 +38,9 @@ Reference
                                B5 AUC @ SNR 10 ≈ 0.927
 
 Usage (server, not dev machine):
-    PYTHONPATH=/content/filippo/BL-Exotica-AD \\
+    PYTHONPATH=/content/filippo/Platypus \\
     python scripts/debug/statistical_baseline.py \\
-        --cache /content/nvme_esterno/filippo/BL-Exotica-AD/data/processed/cache_gbt_fine \\
+        --cache /content/nvme_esterno/filippo/Platypus/data/processed/cache_gbt_fine \\
         --out_dir outputs/sweeps/statistical_baseline
 """
 

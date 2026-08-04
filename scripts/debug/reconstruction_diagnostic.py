@@ -9,10 +9,10 @@ For quiet, mild-RFI, and strong-RFI snippets, reports:
   - Per-sample scatter: input energy vs reconstruction energy
 
 Usage (on server):
-    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/content/filippo/BL-Exotica-AD \
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/content/filippo/Platypus \
     python scripts/debug/reconstruction_diagnostic.py \
         --checkpoint outputs/training/.../checkpoints/best.ckpt \
-        --cache /content/nvme_esterno/filippo/BL-Exotica-AD/data/processed/cache_gbt_fine \
+        --cache /content/nvme_esterno/filippo/Platypus/data/processed/cache_gbt_fine \
         --split val \
         --out_dir outputs/debug/recon_diagnostic
 """

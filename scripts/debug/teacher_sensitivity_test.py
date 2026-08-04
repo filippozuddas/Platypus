@@ -41,7 +41,7 @@ Decision branches printed at the end:
 Cost: ~1.5k teacher forwards + one 257x257 solve — minutes on GPU, no training.
 
 Usage (server, not dev machine):
-    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/BL-Exotica-AD \
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/Platypus \
     python scripts/debug/teacher_sensitivity_test.py \
         --checkpoint outputs/training/20260624_084754_057f87c/checkpoints/epoch=006-val_loss=2.1715.ckpt \
         --cache /path/to/data/processed/cache_gbt_fine

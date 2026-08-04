@@ -23,7 +23,7 @@ Checks, in order:
   6. ``model(x)`` raises ``NotImplementedError`` (no pixel decoder, by design).
 
 Usage (server, torch + the pinned checkpoint required):
-    PYTHONPATH=/path/to/BL-Exotica-AD python scripts/debug/smoke_test_udma.py \\
+    PYTHONPATH=/path/to/Platypus python scripts/debug/smoke_test_udma.py \\
         --model_config configs/model/udma.yaml
 """
 

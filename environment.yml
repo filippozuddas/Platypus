@@ -1,4 +1,4 @@
-name: bl-exotica-ad
+name: platypus
 channels:
   - conda-forge
   - defaults

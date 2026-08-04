@@ -32,7 +32,7 @@ scoring path (same off_ceiling construction as `scripts/inference.py`, same
 `full_row_hits` rule) so what the picture shows is what the pipeline does.
 
 Usage (server, AFTER commit+push so --preproc_mode exists):
-    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/BL-Exotica-AD \
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/Platypus \
     python scripts/debug/morphology_anomaly_maps.py \
         --checkpoint outputs/training/20260707_093113_6d0d1ba/checkpoints/epoch=057-val_loss=0.2065.ckpt \
         --cadence_list data/raw/gbt_0000_heldout_cadences.txt \

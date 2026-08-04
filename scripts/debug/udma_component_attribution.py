@@ -62,7 +62,7 @@ which is by far the best single term at SNR 10. Full record in
 ``docs/03_teacher-localization.md`` §6.
 
 Usage:
-    PYTHONPATH=/path/to/BL-Exotica-AD python scripts/debug/udma_component_attribution.py \\
+    PYTHONPATH=/path/to/Platypus python scripts/debug/udma_component_attribution.py \\
         --checkpoint outputs/training/20260707_093113_6d0d1ba/checkpoints/epoch=057-val_loss=0.2065.ckpt \\
         --model_config configs/model/udma_old_teacher.yaml \\
         --cache /path/to/data/processed/cache_gbt_fine_exotica \\

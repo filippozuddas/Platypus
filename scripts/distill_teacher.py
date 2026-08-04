@@ -18,7 +18,7 @@ src/training/distill.py; this script is a thin CLI wrapper (loads data/P,
 calls distill_teacher(), saves the result).
 
 Usage (server, not dev machine):
-    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/BL-Exotica-AD \\
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/Platypus \\
     python scripts/distill_teacher.py \\
         --config configs/training/udma_gbt_fine_control_bs256.yaml \\
         --epochs 2 --lr 1e-3 \\

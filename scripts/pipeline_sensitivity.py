@@ -44,7 +44,7 @@ Two stages deserve a note on why they are measured rather than assumed:
   is the one to watch.
 
 Usage (run on the server, AFTER recompute_anomaly_maps.py has finished):
-    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/BL-Exotica-AD \
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/Platypus \
     python scripts/pipeline_sensitivity.py \
         --checkpoint outputs/training/20260707_093113_6d0d1ba/checkpoints/epoch=057-val_loss=0.2065.ckpt \
         --cadence_list data/raw/gbt_0000_heldout_cadences.txt \

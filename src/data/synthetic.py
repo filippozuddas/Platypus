@@ -1,5 +1,5 @@
 """
-Synthetic signal generators for the BL-Exotica-AD injection-recovery tests.
+Synthetic signal generators for the Platypus injection-recovery tests.
 
 This module hosts one generator per GBT data product / signal class:
 
@@ -388,7 +388,7 @@ class _SetigenInjector:
 
     SNR convention: setigen's frame-integrated ``Frame.get_intensity(snr)``. The
     RST per-ON rescaling (``sqrt(tchans / tchans_per_obs)``) is intentionally
-    dropped: BL-Exotica-AD scores a single frame, not a 6-observation cadence.
+    dropped: Platypus scores a single frame, not a 6-observation cadence.
     """
 
     def __init__(self, params, seed: Optional[int] = None):

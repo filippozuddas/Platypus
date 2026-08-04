@@ -1,4 +1,4 @@
-# BL-Exotica-AD
+# Platypus
 
 Unsupervised anomaly detection pipeline for searching technosignatures in Green Bank Telescope (GBT) observations of sources from the [Breakthrough Listen Exotica Catalog](https://arxiv.org/abs/2006.11304) (Lacki et al. 2020).
 
@@ -65,7 +65,7 @@ Observations follow an ABACAD cadence pattern (3 ON-source + 3 OFF-source), each
 
 ```bash
 conda env create -f environment.yml
-conda activate bl-exotica-ad
+conda activate platypus
 pip install -e .
 ```
 
@@ -170,7 +170,7 @@ bl-inference --checkpoint outputs/training/<run>/checkpoints/best.ckpt \
 ## Repository Layout
 
 ```
-BL-Exotica-AD/
+Platypus/
 ├── configs/
 │   ├── data/                 # per-product data configs
 │   │   ├── gbt_fine.yaml         # 0000.fil (narrowband, ~3 Hz)

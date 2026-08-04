@@ -6,7 +6,7 @@ without this step the students would regress raw, unnormalized teacher
 features, which violates Q2 and invalidates the run.
 
 Usage (server, not dev machine):
-    PYTHONPATH=/path/to/BL-Exotica-AD python scripts/fit_udma_teacher_norm.py \\
+    PYTHONPATH=/path/to/Platypus python scripts/fit_udma_teacher_norm.py \\
         --config configs/training/udma_gbt_fine.yaml \\
         --out outputs/udma_teacher_norm/gbt_fine_block3.pt
 

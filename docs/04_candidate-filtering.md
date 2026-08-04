@@ -154,8 +154,23 @@ negatives on the exact signals being searched for**. Not worth it.
 
 ## 6. Where the short list actually loses candidates
 
-Measured 2026-07-21 over 280k heldout candidates: **73% die at the OFF-noise
-ceiling before the ON/OFF logic engages at all.** `off_ceiling` dominates
-FAR@1%, so the ceiling — not the ON/OFF rules — is the binding constraint. The
-accepted short list has a median ON/OFF contrast of only 1.21, which is why
-§3.1's scale limitation matters more than any refinement to §4–§5.
+Measured 2026-07-21 over 280k heldout candidates: **73% die at the `off_ceiling`
+gate before the ON/OFF logic engages at all.** The accepted short list has a
+median ON/OFF contrast of only 1.21, which is why §3.1's scale limitation
+matters more than any refinement to §4–§5.
+
+Two clarifications that earlier versions of this section got wrong, both
+settled by the full 364-cadence audit in
+[`06_threshold-audit.md`](06_threshold-audit.md):
+
+- **The stage is `off_ceiling`; the term is `thresh_5`.** `off_ceiling` is
+  `max(off_noise_ceiling(probe), thresh_5)`, and across all 364 cadences the
+  `max` is *always* won by `thresh_5`. So the 73% figure is about the gate, not
+  about the OFF-noise ceiling proper — which has never once been the binding
+  term. Do not read "73% die at the OFF-noise ceiling" as evidence that the
+  OFF-noise machinery is doing the rejecting; it is inert in production.
+- **`off_ceiling` does not dominate FAR@1% everywhere.** On 32.7% of cadences
+  (119/364) `far_thresh` sits *above* `off_ceiling` — median 3.1x, max 162x —
+  so on that third the top-1% pre-cut, not the ceiling, is the binding and
+  signal-killing constraint. The earlier unconditional claim came from a
+  150-cadence partial run and is superseded.

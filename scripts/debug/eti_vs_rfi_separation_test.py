@@ -45,7 +45,7 @@ Decisive readout:
     a structural ceiling, and 0000.fil is still alive.
 
 Usage (server, not dev machine):
-    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/BL-Exotica-AD \
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/Platypus \
     python scripts/debug/eti_vs_rfi_separation_test.py \
         --checkpoint outputs/training/<run_id>/checkpoints/<best>.ckpt \
         --cache /path/to/data/processed/cache_gbt_fine \
