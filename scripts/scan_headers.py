@@ -94,6 +94,13 @@ def parse_filename(path: Path) -> dict:
 # Header reading (no data load) — h5py first, blimpy as fallback
 # ---------------------------------------------------------------------------
 
+def _as_str(value) -> str:
+    """HDF5 string attributes may come back as bytes or numpy scalars."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").strip()
+    return str(value).strip()
+
+
 def read_header_h5py(path: Path) -> dict:
     import h5py
     with h5py.File(str(path), "r") as f:
@@ -116,6 +123,8 @@ def read_header_h5py(path: Path) -> dict:
     f_hi   = max(fch1, fch1 + foff * nchans)
     return {
         "ntime": ntime, "nchans": nchans, "nifs": nifs,
+        "tstart_mjd":  float(h.get("tstart", float("nan"))),
+        "source_name": _as_str(h.get("source_name", "")),
         "fch1_MHz":    round(fch1, 6),
         "foff_Hz":     round(foff * 1e6, 4),
         "f_start_MHz": round(f_lo, 4),
@@ -141,6 +150,8 @@ def read_header_blimpy(path: Path) -> dict:
     f_hi   = max(fch1, fch1 + foff * nchans)
     return {
         "ntime": ntime, "nchans": nchans, "nifs": nifs,
+        "tstart_mjd":  float(h.get("tstart", float("nan"))),
+        "source_name": _as_str(h.get("source_name", "")),
         "fch1_MHz":    round(fch1, 6),
         "foff_Hz":     round(foff * 1e6, 4),
         "f_start_MHz": round(f_lo, 4),
@@ -427,13 +438,14 @@ def main():
             "scan_num", "target",
             "f_start_MHz", "f_stop_MHz", "bw_MHz", "fch1_MHz", "foff_Hz",
             "nchans", "ntime", "nifs", "tsamp_s", "duration_s",
+            "tstart_mjd", "source_name", "parse_error", "header_error",
         ]
         out = Path(args.out)
         with open(out, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=csv_cols, extrasaction="ignore")
             writer.writeheader()
-            writer.writerows(good)
-        print(f"\n  CSV saved → {out}  ({len(good)} rows)")
+            writer.writerows(good + bad)
+        print(f"\n  CSV saved → {out}  ({len(good)} rows, {len(bad)} with errors)")
 
 
 if __name__ == "__main__":
