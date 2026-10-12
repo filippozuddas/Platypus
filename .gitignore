@@ -11,6 +11,14 @@ CLAUDE.md
 .claude/
 .scratch/
 docs/agents/
+AGENTS.md
+
+# Internal research tracking — audit, plans, decisions, server details
+PLAN.md
+TODO.md
+docs/adr/
+docs/research/
+docs/server-access.md
 
 # Python
 __pycache__/

@@ -146,16 +146,19 @@ cadences change verdict. The definitions can be unified without consequence.
 
 ---
 
-## 5. Finding 3 — the fix is affordable
+## 5. Finding 3 — candidate volume under the proposed variant
 
-The stated fix follows directly from §1: **stage 1 must never be stricter than
-stage 3.**
+The proposed stage-1 variant is:
 
 ```
 stage-1 threshold  =  min(far_thresh, off_ceiling)
 ```
 
-Nothing that could survive the ON/OFF filter is discarded before reaching it.
+**This does not guarantee preservation of every ON/OFF-admissible signal.**
+Stage 1 thresholds the mean of the four highest cells; the later filter can
+accept two ON cells. Two ON cells at 1.1 times the ceiling and all other cells
+at zero give a top-four mean of 0.55 times the ceiling: the first cut still fails
+when its threshold is the ceiling. Test recovery through the full search.
 Where `far_thresh` is already below the ceiling — two thirds of cadences —
 nothing changes at all.
 
@@ -169,9 +172,9 @@ nothing changes at all.
 | Per-cadence multiplier, affected only | median 3.1, p90 6.2, max 13.7 |
 | New clusters per affected cadence | median 1,251, p90 2,939, max 8,475 |
 
-A 47% increase overall, concentrated entirely in the third of cadences where
-the search is currently not happening. That is not added noise — it is
-recovered bandwidth.
+A 47% increase in cluster count, concentrated in the affected third of rows.
+These additional clusters are not established astrophysical signals or recovered
+bandwidth; their composition and human workload still require measurement.
 
 ### The population also improves
 
@@ -184,20 +187,21 @@ current clusters, **123,282 (44%) have zero ON-row cells above the ceiling** —
 they are in the top 1% by score yet cannot pass stage 3 under any
 circumstances. They exist only because the quota had to be filled.
 
-**Consequence to keep in mind:** the short list will therefore grow by *more*
-than 1.47x, since the new candidates are qualitatively more likely to pass. The
-2.9% stage-3 admission rate measured on the current population is a lower bound
-for the new one.
+The old 2.9% admission rate is not a guaranteed lower bound for the new population.
+Changed clusters and representatives require recomputing the downstream selection.
 
 ---
 
 ## 6. What is not yet measured
 
-**Manual review load.** Cluster counts are machine numbers; the human budget is
-the real constraint. Measurable offline on the 150 cadences that already have
-maps: rerun `full_row_hits` at the new threshold and count short-list entries.
-No HDD access, no model inference. **This is the open question that could still
-sink the fix.**
+**Manual review load — updated 2026-10-06 from saved CSVs.** The earlier 150-row
+map audit was partial. The 364-row table reports 412,182 proposed clusters,
+319,263 with maps and 92,919 without. There are **12,246 observed shortlist
+entries** on the covered maps. Missing maps represent 22.5% of proposed clusters
+and 70.4% of the net increase in counts. Extrapolating to ~15,800 is not a full
+measurement or a guaranteed bound; the observed 12,246 is a lower bound within
+this artifact's selection. The old shortlist contains 8127 entries. Actual
+review times and full-pipeline workload remain to be measured.
 
 **Which threshold is correct** (§4). Also offline, from the saved probe maps.
 
@@ -221,7 +225,7 @@ files, none loads the model, all run against a partially complete recompute.
 | `scripts/debug/threshold_regime.py` | Which cut binds, per cadence; which term wins inside `off_ceiling`; pooling sensitivity. |
 | `scripts/debug/candidate_volume.py` | Cluster volume under the proposed stage-1 rule, all 364 cadences. |
 | `scripts/debug/recover_off_ceiling.py` | Single-cadence and single-candidate breakdown, row by row. |
-| `scripts/pipeline_sensitivity.py` | End-to-end injection survival by stage; the measurement that started this. |
+| `scripts/pipeline_sensitivity.py` | Injected-window scores and simulated downstream survival; does not rebuild the full search and ranking. |
 
 ---
 

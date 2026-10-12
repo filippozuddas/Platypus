@@ -170,7 +170,7 @@ settled by the full 364-cadence audit in
   term. Do not read "73% die at the OFF-noise ceiling" as evidence that the
   OFF-noise machinery is doing the rejecting; it is inert in production.
 - **`off_ceiling` does not dominate FAR@1% everywhere.** On 32.7% of cadences
-  (119/364) `far_thresh` sits *above* `off_ceiling` — median 3.1x, max 162x —
+  (119/364) `far_thresh` sits *above* `off_ceiling` — median 3.77x, max 162x —
   so on that third the top-1% pre-cut, not the ceiling, is the binding and
   signal-killing constraint. The earlier unconditional claim came from a
   150-cadence partial run and is superseded.

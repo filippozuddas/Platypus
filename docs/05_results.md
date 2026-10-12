@@ -3,11 +3,19 @@
 Validation results for the production UDMA scorer, and an honest list of what is
 known to be wrong or unverified.
 
-**Last updated:** 2026-07-27
+**Last updated:** 2026-10-06 (historical results clarified; no new experiment)
 **Model:** [`02_udma-architecture.md`](02_udma-architecture.md) ·
 **Bars:** §9 of that document, pre-registered before any run
 
 ---
+
+**Provenance matters.** This page combines historical experiments, not one
+homogeneous benchmark. Sections 1 and the main table in 3 describe SRT work;
+the later per-cadence numbers in 3 concern GBT with the historical preprocessing.
+Sections 5–6 concern GBT `6d0d1ba/epoch=057` evaluated with `per_obs`.
+Exact resolved configs and hparams still need archiving before reproduction.
+The Tier A manifest contains one sequence on one night; Tier B contains seven
+sequences on two nights. Neither is broad independent validation.
 
 ## 1. Acceptance bars — all passed
 
@@ -45,10 +53,12 @@ training as normal; residual survives only where the line departs from the
 learned pattern. This is the intended "suppress the known, flag the unexpected"
 behaviour.
 
-**Blind to ON/OFF occupancy, by construction.** UDMA does not distinguish
-ON-only from persistent signals (AUC ~0.49, chance). This is correct: there is
-no cadence objective in training, and ON/OFF discrimination is the downstream
-stage's job ([`04_candidate-filtering.md`](04_candidate-filtering.md)).
+**No supervised ON/OFF objective.** The early occupancy probe reported AUC
+~0.49. The later component-attribution results cited by the October review
+report ~0.36–0.40 in a different setting: inversion is not chance performance.
+Keep their checkpoints and populations separate; the training objective alone
+does not imply invariance to occupancy. ON/OFF discrimination is a downstream
+stage whose leakage and rejection tradeoff must be measured.
 
 ## 3. Injection-recovery sensitivity
 
@@ -75,7 +85,9 @@ Two measurement caveats worth knowing, both discovered later:
 ## 4. Does the architecture earn its complexity?
 
 Component attribution at matched energy against **real RFI**: UDMA beats trivial
-statistics by **+0.07–0.09 AUC**. The memory unit earns its place.
+statistics by **+0.07–0.09 AUC** in that historical scorer benchmark. This does
+not isolate a causal benefit of memory or establish superiority after candidate
+selection; a common-pipeline baseline and memory ablation remain necessary.
 
 Two caveats that matter for interpretation:
 
@@ -96,7 +108,7 @@ been run. Short-list behaviour on 280k held-out candidates:
   audit in [`06_threshold-audit.md`](06_threshold-audit.md): the gate's value is
   always set by the `thresh_5` floor, never by `off_noise_ceiling()` (0/364), so
   the OFF-noise machinery is inert in production; and on 32.7% of cadences the
-  top-1% `far_thresh` pre-cut sits *above* the gate (median 3.1x, max 162x) and
+  top-1% `far_thresh` pre-cut sits *above* the gate (median 3.77x, max 162x) and
   is itself the binding, signal-killing cut.
 - The accepted short list has a median ON/OFF contrast of only **1.21** — weak.
 
@@ -104,9 +116,9 @@ A real-signal control is available: on a Voyager-1 cadence the pipeline ranks
 the true carrier first, with an ON/OFF contrast of ~32 and a clean 3/3 short
 list with no noise entries.
 
-## 6. Morphology sensitivity — what the search is complete to
+## 6. Morphology sensitivity — historical simulated stage survival
 
-`outputs/sensitivity/morphologies_v7`, 2026-07-27. 20 held-out cadences × 25
+`outputs/sensitivity/morphologies_v7`, 2026-07-27. 20 held-out band-cadence rows × 25
 injection sites × 8 signal classes × 6 SNR levels (including a 0 control),
 n = 500 per class per SNR. Production model frozen at `6d0d1ba/epoch=057`,
 `--preproc_mode per_obs`. Sites are drawn once per cadence and **shared across
@@ -114,12 +126,19 @@ classes**, so the comparison between rows is paired. Every class is injected
 ON-only; the two 2D-shape classes place one complete copy of the shape inside
 each ON observation, three per cadence.
 
-This is the first measurement of the *pipeline* rather than the *scorer*: every
-earlier benchmark stopped at "does the score clear a threshold".
+The server manifest order maps these rows to **17 observing sequences on 13
+nights**, not the first 20 rows of the differently ordered local manifest.
+Shared sites mean shared background windows, not necessarily identical signal
+positions across morphologies.
 
-**Completeness at SNR 30**, as a percentage of injections:
+This extends the scorer benchmark with simulated downstream decisions. It does
+not rescan the full injected observation, rebuild overlapping-window clusters,
+or measure actual human review. The `min()` column does not recompute ranking
+against that variant's own shortlist. These are not survey completeness estimates.
 
-| class | model (`s0`) | reaches a human | with the [`06`](06_threshold-audit.md) fix |
+**Historical survival at SNR 30**, as a percentage of injections:
+
+| class | model (`s0`) | simulated shipped selection | simulated `min()` selection ([limits](06_threshold-audit.md)) |
 |---|---|---|---|
 | `smiley_face` | 100.0 | 79.2 | **99.2** |
 | `random_2d` | 100.0 | 75.8 | **95.4** |
@@ -130,7 +149,7 @@ earlier benchmark stopped at "does the score clear a threshold".
 | `narrowband_pulsed` | 90.6 | 70.0 | 83.4 |
 | `wideband_continuous` | 60.0 | 36.2 | 43.8 |
 
-At SNR 15, end-to-end as shipped: `random_2d` 80.0 · `smiley_face` 79.0 ·
+At SNR 15, simulated shipped selection: `random_2d` 80.0 · `smiley_face` 79.0 ·
 `narrowband_sine` 59.4 · `narrowband_accel` 55.0 · `wideband_pulsed` 53.8 ·
 `narrowband_drift` 44.8 · `wideband_continuous` 23.6 · `narrowband_pulsed` 9.2.
 
@@ -147,7 +166,9 @@ construction, consistent with the 32.7% found across all 364 cadences in
 [`06_threshold-audit.md`](06_threshold-audit.md). Across the other classes stage 1
 lands at 78–84% at SNR 50 regardless of morphology; for `narrowband_accel` the
 end-to-end figure *equals* stage 1 exactly (83.8 = 83.8). Replacing the quota with
-an absolute threshold recovers 13–20 points on every class.
+the `min()` variant increases simulated survival by 13.4–20 points for seven
+classes, and **7.6 points** for `wideband_continuous`. Its threshold still depends
+on the cadence; this is not evidence for a globally calibrated absolute cutoff.
 
 **6.2 The effect of pulsing depends on bandwidth, and changes sign.** The 2×2 in
 (frequency extent) × (time structure), `s0` at SNR 30:
