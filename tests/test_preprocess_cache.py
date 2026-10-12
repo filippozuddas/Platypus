@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from scripts.preprocess_cache import build_cache
-from src.data.cache import CacheError, sha256_file, verify_cache
+from src.data.cache import CacheError, check_cache_content, sha256_file, verify_cache
 from src.data.torch_dataset import CachedDataset, build_datasets
 
 N_OBS, NTIME, NCHANS, FCHANS, TCHANS = 6, 16, 4096, 1024, 96   # 4 channel blocks per file
@@ -167,3 +167,20 @@ def test_cache_mode_loads_and_legacy_fallback_warns(manifests, tmp_path):
         except Exception:
             pass  # only the warning matters here; raw reading is out of scope
     assert any("falling back to reading raw files" in str(w.message) for w in caught)
+
+
+def test_content_check_passes_then_detects_corruption(manifests, tmp_path):
+    train_m, val_m, *_ = manifests
+    out = tmp_path / "cache"
+    _build(train_m, val_m, out)
+    splits = {"train": train_m, "val": val_m}
+
+    records = check_cache_content(out, splits, n_per_split=100)
+    assert len(records) == 6 + 4 and all(r["equal"] for r in records)
+
+    arr = np.load(out / "val.npy", mmap_mode="r+")
+    arr[3, 2, 0, 0] += 1.0
+    arr.flush()
+    del arr
+    records = check_cache_content(out, splits, n_per_split=100)
+    assert [(r["split"], r["sample"]) for r in records if not r["equal"]] == [("val", 3)]

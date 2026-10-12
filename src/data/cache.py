@@ -108,3 +108,51 @@ def verify_cache(
             )
 
     return meta
+
+
+def check_cache_content(
+    cache_dir: Union[str, Path],
+    manifests: Mapping[str, Union[str, Path]],
+    *,
+    n_per_split: int,
+    seed: int = 0,
+) -> List[Dict]:
+    """
+    Re-read randomly chosen cached snippets from the raw files named by the
+    index and compare them exactly. Returns one record per checked snippet
+    (split, sample, manifest_row, chan_start, equal). Structural checks and
+    manifest identity go through verify_cache first.
+    """
+    import h5py
+    try:
+        import hdf5plugin  # noqa: F401 — registers bitshuffle/LZ4 filters for BL HDF5 files
+    except ImportError:
+        pass
+
+    cache_dir = Path(cache_dir)
+    meta = json.loads((cache_dir / "meta.json").read_text())
+    geom = meta["geometry"]
+    verify_cache(cache_dir, tchans=geom["n_obs"] * geom["tchans_per_obs"],
+                 fchans=geom["fchans"], manifests=manifests)
+
+    rng = np.random.default_rng(seed)
+    records = []
+    for split, manifest in manifests.items():
+        cadences = load_manifest(manifest)
+        arr = np.load(cache_dir / f"{split}.npy", mmap_mode="r")
+        with np.load(cache_dir / f"{split}_index.npz") as idx:
+            rows, chans = idx["manifest_row"], idx["chan_start"]
+        n = min(n_per_split, len(arr))
+        for i in np.sort(rng.choice(len(arr), size=n, replace=False)):
+            row, chan = int(rows[i]), int(chans[i])
+            equal = True
+            for obs, path in enumerate(cadences[row]):
+                with h5py.File(path, "r") as f:
+                    dset = f["data"]
+                    sel = (slice(0, geom["tchans_per_obs"]),)
+                    sel += (0,) if dset.ndim == 3 else ()
+                    raw = dset[sel + (slice(chan, chan + geom["fchans"]),)]
+                equal &= bool(np.array_equal(arr[i, obs], raw))
+            records.append({"split": split, "sample": int(i), "manifest_row": row,
+                            "chan_start": chan, "equal": equal})
+    return records
