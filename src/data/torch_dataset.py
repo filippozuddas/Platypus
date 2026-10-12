@@ -5,10 +5,12 @@ try:
     import hdf5plugin  # noqa: F401 — registers bitshuffle/LZ4 filters for BL HDF5 files
 except ImportError:
     pass
+import warnings
 from pathlib import Path
 from torch.utils.data import Dataset, Subset
 from typing import Any, Dict, List, Tuple, Union
 
+from .cache import verify_cache
 from .preprocessing import bandpass_correct, core_transform
 
 
@@ -301,16 +303,53 @@ def build_datasets(
 
     Returns:
         (train_dataset, val_dataset) pair of SpectrogramDatasets (lazy) or
-        CachedDatasets (if cfg_data["dataset"]["cache_dir"] exists on disk).
+        CachedDatasets.
+
+    ``cfg_data["dataset"]["source"]`` selects the data path explicitly:
+      - "cache": a format-2 cache (src/data/cache.py) is required. It must match
+        the frame geometry and the sha256 of ``train_cadence_list`` /
+        ``val_cadence_list``; anything else raises CacheError.
+      - "raw": read snippets from the cadence list, ignoring any cache_dir.
+      - absent (legacy configs): use cache_dir if it exists on disk, otherwise
+        fall back to raw reading with a warning.
     """
-    cache_dir = cfg_data.get("dataset", {}).get("cache_dir")
-    if cache_dir and Path(cache_dir).is_dir():
-        cfg_preproc = cfg_data["preprocessing"]
+    dataset_cfg = cfg_data.get("dataset", {})
+    source = dataset_cfg.get("source")
+    cache_dir = dataset_cfg.get("cache_dir")
+    use_mmap = dataset_cfg.get("mmap", True)
+
+    if source == "cache":
+        for key in ("cache_dir", "train_cadence_list", "val_cadence_list"):
+            if not dataset_cfg.get(key):
+                raise ValueError(f"dataset.source: cache requires dataset.{key}")
         cache_path = Path(cache_dir)
-        use_mmap = cfg_data.get("dataset", {}).get("mmap", True)
+        verify_cache(
+            cache_path,
+            tchans=cfg_data["frame"]["tchans"],
+            fchans=cfg_data["frame"]["fchans"],
+            manifests={"train": dataset_cfg["train_cadence_list"],
+                       "val": dataset_cfg["val_cadence_list"]},
+        )
+        cfg_preproc = cfg_data["preprocessing"]
         train_ds = CachedDataset(cache_path, "train", cfg_preproc, mmap=use_mmap)
         val_ds   = CachedDataset(cache_path, "val",   cfg_preproc, mmap=use_mmap)
         return train_ds, val_ds
+    if source not in (None, "raw"):
+        raise ValueError(f"dataset.source must be 'cache' or 'raw', got {source!r}")
+
+    if source is None and cache_dir:
+        if Path(cache_dir).is_dir():
+            cfg_preproc = cfg_data["preprocessing"]
+            cache_path = Path(cache_dir)
+            train_ds = CachedDataset(cache_path, "train", cfg_preproc, mmap=use_mmap)
+            val_ds   = CachedDataset(cache_path, "val",   cfg_preproc, mmap=use_mmap)
+            return train_ds, val_ds
+        warnings.warn(
+            f"cache_dir {cache_dir} not found: falling back to reading raw files from the "
+            f"cadence list with an internal {val_fraction:.0%} val split. Set "
+            f"dataset.source to make the data path explicit.",
+            stacklevel=2,
+        )
 
     rng = np.random.default_rng(seed)
     cadences = [[Path(p) for p in group] for group in cadence_list]

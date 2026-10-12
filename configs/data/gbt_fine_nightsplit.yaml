@@ -1,0 +1,68 @@
+# GBT fine-frequency data product (*.0000.fil) — observing-night split (2026-10-12)
+#
+# Same product, frame and preprocessing as gbt_fine.yaml; only the dataset
+# block differs: night-disjoint manifests and an explicit format-2 cache.
+# ~3 Hz/chan — sensitive to narrowband drifting signals
+#
+# Input to the model is the full 6-observation cadence stacked along the time
+# axis: 6 × 16 bins = 96 bins total (tchans below). Each observation is
+# normalised independently before stacking (per-observation bandpass + log/MAD).
+
+product: gbt_fine
+
+raw:
+  nchans: 67108864          # Fixed per product type
+  nifs: 1
+  df: 2.7939677238464355    # Hz per channel
+  dt: 18.25361108           # Seconds per time bin (single observation bin)
+  # nints per observation: 16 (confirmed from real data shape (16, 1, 67108864))
+
+frame:
+  tchans: 96                # 6 obs × 16 bins/obs — full cadence, input shape to model
+  fchans: 1024
+  downsample_factor: 1      # no downsampling — 0000.fil is already at 2.79 Hz/chan; narrowband signals would be sub-pixel after pooling
+  stride_train: 1024        # no overlap in training
+  stride_infer: 512         # 50% overlap in inference
+
+preprocessing:
+  bandpass_method: polynomial   # 'polynomial' | 'median'
+  poly_degree: 3                # tune against real data on first Colab session
+  mad_epsilon: 1.0e-6
+
+# Narrowband drifting (ETI-like) injection — see src/data/synthetic.py
+narrowband:
+  snr_min: 5.0             # log-uniform peak SNR (setigen frame-integrated)
+  snr_max: 50.0
+  drift_distribution: lognormal   # 'lognormal' (centred on drift_median) or 'loguniform'
+  drift_median: 0.3        # Hz/s — Earth+exoplanet rotational scale; |DR| upper clip is window-limited
+  drift_log_sigma: 0.5     # spread in dex
+  min_nonzero_drift: 0.01  # Hz/s — sampler floor
+  zero_drift_prob: 0.05    # P(exactly zero drift) — compensated beacon
+  eti_width_offset_min: 1.0   # Hz — width = |DR|*dt + U(offset_min, offset_max)
+  eti_width_offset_max: 10.0
+  scatter_width_min: 3.0   # Hz — lorentzian/voigt scattering-wing FWHM range
+  scatter_width_max: 40.0
+  scint_timescale_min: 60.0   # s — AR(1) scintillation correlation timescale
+  scint_timescale_max: 600.0
+  scint_depth_min: 0.2     # log-amplitude modulation depth
+  scint_depth_max: 0.6
+  # Frequency/temporal profile weights are code-level defaults (NarrowbandParams).
+
+loader:
+  chunk_size: 64            # Time bins loaded per chunk (memory control)
+  overlap: 16               # Overlapping bins between chunks
+
+dataset:
+  # Night-disjoint split verified on the 0000 headers (tstart) on 2026-10-12:
+  # train = nights S01/S03/S06/S14 (263 rows), devcal = 8 development/calibration
+  # nights (299 rows), final = 5 reserved nights (343 rows, never read in training).
+  source: cache                # explicit: a missing or mismatched cache is an error
+  train_cadence_list: data/raw/gbt_0000_nightsplit_train.txt
+  val_cadence_list: data/raw/gbt_0000_nightsplit_devcal.txt   # students' val: 300 snippets/row
+  # Read unconditionally by train.py / fit_udma_teacher_norm.py / distill_teacher.py;
+  # ignored by build_datasets() in cache mode.
+  cadence_list: data/raw/gbt_0000_nightsplit_train.txt
+  # Built via scripts/preprocess_cache.py --train-cadence-list/--val-cadence-list
+  # --snippets-per-cadence 2200 --val-snippets-per-cadence 300
+  cache_dir: /content/nvme_esterno/filippo/Platypus/data/processed/cache_gbt_fine_nightsplit
+  seed: 42
