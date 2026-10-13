@@ -44,7 +44,6 @@ import argparse
 import json
 import os
 import random
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,6 +58,7 @@ from tqdm import tqdm
 
 from src.data.cache import CACHE_FORMAT_VERSION, load_manifest, sha256_file
 from src.utils.config import load_config
+from src.utils.provenance import git_state
 
 
 # ---------------------------------------------------------------------------
@@ -124,18 +124,6 @@ def _extract_cadence_snippets(
 # ---------------------------------------------------------------------------
 # Pre-split extraction (cache format 2)
 # ---------------------------------------------------------------------------
-
-def _git_state() -> dict:
-    repo = Path(__file__).resolve().parent.parent
-    try:
-        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
-                                text=True, check=True).stdout.strip()
-        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
-                               cwd=repo, capture_output=True, text=True, check=True).stdout
-        return {"commit": commit, "dirty": bool(dirty.strip())}
-    except (OSError, subprocess.CalledProcessError):
-        return {"commit": None, "dirty": None}
-
 
 def _write_json_atomic(path: Path, obj) -> None:
     tmp = path.with_name(path.name + ".tmp")
@@ -299,7 +287,7 @@ def build_cache(
     meta.update({
         "complete": True,
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "git": _git_state(),
+        "git": git_state(),
         "preprocessing_at_build": preprocessing,  # informational: the cache stores RAW data
     })
     _write_json_atomic(meta_path, meta)

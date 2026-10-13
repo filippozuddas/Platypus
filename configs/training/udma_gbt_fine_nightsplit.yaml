@@ -1,0 +1,37 @@
+# UDMA reference training on the observing-night split (2026-10-12, phase 04).
+#
+# Hyperparameters of the 20260707_093113_6d0d1ba run (batch 256, lr 1e-3,
+# AdamW, 60 epochs, early stopping on val_st_sum). Differences from that run:
+#   - data: night-disjoint train manifest (263 rows x 2200 snippets) and a val
+#     sample from the development/calibration nights (299 rows x 300 snippets),
+#     read from a verified format-2 cache;
+#   - per-observation preprocessing (6d0d1ba trained on the pre-2026-07-09
+#     concat-then-normalize data);
+#   - teacher statistics refit on the new training nights.
+# Its numbers are therefore not expected to reproduce 6d0d1ba's.
+
+data: configs/data/gbt_fine_nightsplit.yaml
+model: configs/model/udma_nightsplit.yaml
+
+training:
+  batch_size: 256
+  epochs: 60
+  learning_rate: 1.0e-3
+  optimizer: adamw
+  weight_decay: 0.01
+  loss: mse            # unused by UDMA (its own compute_loss owns the objective); kept for schema parity
+  seed: 42
+
+  # Early stopping on S-T regression quality only (UDMA.compute_loss's
+  # "st_sum" = st1+st2, logged as val_st_sum) — NOT val_loss, which also
+  # contains the ss/entropy terms that a degenerate student pair could game.
+  patience: 8
+  min_delta: 1.0e-5
+  monitor: val_st_sum
+
+hardware:
+  num_gpus: 2
+  mixed_precision: true  # bf16-mixed; the frozen ViT teacher has no BatchNorm, LayerNorm is fine in bf16
+  num_workers: 16
+
+output_dir: outputs/training

@@ -13,6 +13,7 @@ Outputs (checkpoints, logs, snapshots) are written to outputs/<run_id>/.
 """
 
 import argparse
+import datetime as _dt
 import logging
 import os
 from pathlib import Path
@@ -25,6 +26,7 @@ from torch.utils.data import DataLoader
 from src.models.autoencoder import build_autoencoder
 from src.data.torch_dataset import build_datasets
 from src.training.trainer import AELightningModule, build_trainer, make_run_dir
+from src.utils.provenance import write_provenance
 from src.training.callbacks import build_callbacks
 from src.utils.config import load_config
 
@@ -198,6 +200,13 @@ def main():
         run_dir = make_run_dir(cfg.get("output_dir", "outputs"))
     os.environ["BL_EXOTICA_RUN_DIR"] = str(run_dir)
     print(f"Run directory: {run_dir}")
+    if int(os.environ.get("LOCAL_RANK", "0")) == 0:
+        # Commit, modified files, data/cache identity, teacher hashes, versions.
+        # A resumed run keeps the original record and adds one per resume.
+        name = "provenance.json" if args.resume is None else f"provenance_resume_{_dt.datetime.now():%Y%m%d_%H%M%S}.json"
+        write_provenance(run_dir / name, cfg,
+                         n_train_snippets=len(train_ds), n_val_snippets=len(val_ds),
+                         resume_from=str(args.resume) if args.resume else None)
 
     # Only the rank-0 process needs snapshot samples (ReconstructionSnapshot is
     # rank_zero_only) -- Lightning's DDP subprocess launcher re-executes this

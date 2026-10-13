@@ -12,6 +12,12 @@ Usage (server, not dev machine):
 
 Then point ``configs/model/udma.yaml``'s ``teacher.norm_stats`` at ``--out``
 before starting ``scripts/train.py``.
+
+Any ``teacher.norm_stats`` already in the config is ignored here (the fit uses
+the raw, pre-normalization teacher features), so the config can name the file
+this run is about to create. An existing ``--out`` is never overwritten; a
+provenance record (data identity, teacher checkpoint hash, git state) is
+written next to it as ``<out>.json``.
 """
 
 import argparse
@@ -23,6 +29,7 @@ from torch.utils.data import DataLoader
 from src.data.torch_dataset import build_datasets
 from src.models.autoencoder import build_autoencoder
 from src.utils.config import load_config
+from src.utils.provenance import write_provenance
 
 
 def _parse_args():
@@ -38,7 +45,10 @@ def _parse_args():
 
 def main():
     args = _parse_args()
+    if args.out.exists():
+        raise SystemExit(f"{args.out} already exists; choose another --out")
     cfg = load_config(args.config)
+    cfg["model"].get("teacher", {}).pop("norm_stats", None)
     architecture = cfg["model"].get("architecture")
     if architecture != "udma":
         raise SystemExit(f"--config's model must be architecture: udma, got '{architecture}'.")
@@ -81,6 +91,8 @@ def main():
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"mu": model.teacher.mu.cpu(), "sigma": model.teacher.sigma.cpu()}, args.out)
+    write_provenance(args.out.with_name(args.out.name + ".json"), cfg,
+                     n_train_snippets=len(train_ds), max_batches=args.max_batches)
     print(f"Saved -> {args.out}")
     print(f"Add to configs/model/udma.yaml: teacher.norm_stats: {args.out}")
 
