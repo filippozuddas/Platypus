@@ -104,10 +104,14 @@ def preprocess_window(obs: Sequence[np.ndarray], f_start: int, fchans: int, tcha
                       preproc: Dict) -> np.ndarray:
     """One ``(tchans, fchans)`` model input: each observation normalised on its
     own slice ``[f_start, f_start + fchans)``, then stacked along time."""
+    return normalize_frames([o[:, f_start:f_start + fchans] for o in obs], tchans, preproc)
+
+
+def normalize_frames(frames: Sequence[np.ndarray], tchans: int, preproc: Dict) -> np.ndarray:
+    """Per-observation ``bandpass_correct`` + ``core_transform``, stacked along time."""
     method = preproc.get("bandpass_method", "polynomial")
     poly_degree = preproc.get("poly_degree", 3)
     mad_epsilon = preproc.get("mad_epsilon", 1e-6)
-    frames = [o[:, f_start:f_start + fchans] for o in obs]
     normed = [
         core_transform(bandpass_correct(f, method=method, poly_degree=poly_degree), mad_epsilon)
         for f in frames
@@ -286,9 +290,18 @@ class MethodResult:
 def select_candidates(scores: np.ndarray, f_starts: np.ndarray, *, model, windows: CadenceWindows,
                       method: str, rule: SelectionRule, freq_step_hz: float, fch1_mhz: float,
                       probe_seed: int, batch_size: int, device: str,
+                      amap_cache: Optional["AmapCache"] = None, stale: frozenset = frozenset(),
                       log: Log = print) -> MethodResult:
     """Thresholds, clustering, cluster anomaly maps, OFF-noise ceiling and
-    short-list membership for one method's window scores on one cadence."""
+    short-list membership for one method's window scores on one cadence.
+
+    ``amap_cache`` reuses anomaly maps of windows whose data are unchanged
+    (:class:`CadenceSearch`); ``stale`` lists the ``f_start`` of windows whose
+    data differ from the cached ones, which are always recomputed and never
+    stored. Maps are computed exactly as without a cache (cluster peaks one
+    window at a time, the probe in its own batches), so the result is the
+    same either way.
+    """
     stride, fchans = windows.stride, windows.fchans
     median, mad_sigma = robust_stats(scores)
     # Gaussian 3s/5s are diagnostic references only: heavy-tailed disagreement
@@ -321,10 +334,16 @@ def select_candidates(scores: np.ndarray, f_starts: np.ndarray, *, model, window
 
     off_pool = []
     for i, (_, crow) in enumerate(clusters.iterrows()):
-        x_c = torch.from_numpy(windows.window(int(crow["f_start_peak"]))).float() \
-            .unsqueeze(0).unsqueeze(0).to(device)
-        with torch.no_grad():
-            amap_c = model.anomaly_map(x_c)[0].cpu().numpy()
+        fs_c = int(crow["f_start_peak"])
+        cacheable = amap_cache is not None and fs_c not in stale
+        if cacheable and fs_c in amap_cache.peak:
+            amap_c = amap_cache.peak[fs_c]
+        else:
+            x_c = torch.from_numpy(windows.window(fs_c)).float().unsqueeze(0).unsqueeze(0).to(device)
+            with torch.no_grad():
+                amap_c = model.anomaly_map(x_c)[0].cpu().numpy()
+            if cacheable:
+                amap_cache.peak[fs_c] = amap_c
         amaps[i] = amap_c
         off_idx = [r for r in OFF_ROWS if r < amap_c.shape[0]]
         if off_idx:
@@ -338,15 +357,23 @@ def select_candidates(scores: np.ndarray, f_starts: np.ndarray, *, model, window
         rng = np.random.default_rng(probe_seed)
         n_bg = min(rule.off_ceiling_probe, len(f_starts))
         bg_fstarts = rng.choice(f_starts, size=n_bg, replace=False)
-        bg_windows = [windows.window(int(fs)) for fs in bg_fstarts]
-        for bstart in range(0, len(bg_windows), batch_size):
-            x_bg = torch.from_numpy(np.stack(bg_windows[bstart:bstart + batch_size])) \
-                .float().unsqueeze(1).to(device)
-            with torch.no_grad():
-                amap_bg = model.anomaly_map(x_bg).cpu().numpy()
-            off_idx = [r for r in OFF_ROWS if r < amap_bg.shape[1]]
-            if off_idx:
-                off_pool.append(amap_bg[:, off_idx, :].ravel())
+        probe_cacheable = amap_cache is not None and not stale.intersection(bg_fstarts.tolist())
+        if probe_cacheable and amap_cache.probe is not None:
+            off_pool.extend(amap_cache.probe)
+        else:
+            probe_cells = []
+            bg_windows = [windows.window(int(fs)) for fs in bg_fstarts]
+            for bstart in range(0, len(bg_windows), batch_size):
+                x_bg = torch.from_numpy(np.stack(bg_windows[bstart:bstart + batch_size])) \
+                    .float().unsqueeze(1).to(device)
+                with torch.no_grad():
+                    amap_bg = model.anomaly_map(x_bg).cpu().numpy()
+                off_idx = [r for r in OFF_ROWS if r < amap_bg.shape[1]]
+                if off_idx:
+                    probe_cells.append(amap_bg[:, off_idx, :].ravel())
+            off_pool.extend(probe_cells)
+            if probe_cacheable:
+                amap_cache.probe = probe_cells
 
     # Robust OFF-noise-core ceiling, floored at thresh_5: the pool is small and
     # detection-biased and can compute below the Gaussian reference, which let
@@ -381,6 +408,123 @@ def select_candidates(scores: np.ndarray, f_starts: np.ndarray, *, model, window
 
     thresholds.update(off_ceiling=off_ceiling, n_probe=n_bg, off_pool_cells=off_pool_n)
     return MethodResult(method, clusters, amaps, thresholds)
+
+
+@dataclass
+class AmapCache:
+    """Anomaly maps of unmodified windows, reused across re-searches of one cadence.
+
+    ``peak``: cluster-peak maps by ``f_start``. ``probe``: the background
+    probe's pooled OFF cells, valid while no probe window is modified.
+    """
+
+    peak: Dict[int, np.ndarray] = field(default_factory=dict)
+    probe: Optional[List[np.ndarray]] = None
+
+
+@dataclass(frozen=True)
+class Patch:
+    """New raw values for channels ``[c0, c0 + width)`` of some observations.
+
+    ``data`` maps an observation index to its ``(ntime, width)`` replacement;
+    observations not listed are unchanged (an ON-only injection lists no OFF).
+    """
+
+    c0: int
+    data: Dict[int, np.ndarray]
+
+    @property
+    def width(self) -> int:
+        return next(iter(self.data.values())).shape[1] if self.data else 0
+
+    @property
+    def c1(self) -> int:
+        return self.c0 + self.width
+
+
+class PatchedWindows:
+    """A cadence's windows with a :class:`Patch` applied, without copying the cadence.
+
+    Same interface as :class:`CadenceWindows` (``f_starts``, ``window``, ...);
+    ``affected`` indexes the windows whose channels overlap the patch.
+    """
+
+    def __init__(self, base: CadenceWindows, patch: Patch):
+        self.base, self.patch = base, patch
+        self.fchans, self.tchans, self.stride, self.preproc = (
+            base.fchans, base.tchans, base.stride, base.preproc)
+        self.nchans, self.f_starts = base.nchans, base.f_starts
+        ntime = base._obs[0].shape[0]
+        if patch.c0 < 0 or patch.c1 > self.nchans:
+            raise ValueError(f"patch channels [{patch.c0}, {patch.c1}) outside [0, {self.nchans})")
+        for i, arr in patch.data.items():
+            if not 0 <= i < len(base._obs) or arr.shape != (ntime, patch.width):
+                raise ValueError(f"patch for observation {i} has shape {arr.shape}, "
+                                 f"expected ({ntime}, {patch.width})")
+        overlap = (self.f_starts < patch.c1) & (self.f_starts + self.fchans > patch.c0)
+        self.affected = np.flatnonzero(overlap) if patch.width else np.array([], dtype=int)
+
+    def window(self, f_start: int) -> np.ndarray:
+        c0, c1 = self.patch.c0, self.patch.c1
+        lo, hi = max(c0, f_start), min(c1, f_start + self.fchans)
+        if lo >= hi:
+            return self.base.window(f_start)
+        frames = []
+        for i, obs in enumerate(self.base._obs):
+            frame = obs[:, f_start:f_start + self.fchans]
+            if i in self.patch.data:
+                frame = np.array(frame)
+                frame[:, lo - f_start:hi - f_start] = self.patch.data[i][:, lo - c0:hi - c0]
+            frames.append(frame)
+        return normalize_frames(frames, self.tchans, self.preproc)
+
+
+class CadenceSearch:
+    """One cadence searched once in full, then re-searched after modifications.
+
+    The background search scores every window and caches anomaly maps.
+    :meth:`search` applies a :class:`Patch` (e.g. one injected signal),
+    re-scores only the windows it overlaps and re-runs every selection stage on
+    the whole cadence — FAR threshold, clustering (including merges with
+    existing clusters), probe, OFF-noise ceiling, ON/OFF and short list — so
+    the result is the search of the modified cadence. Preprocessing is
+    window-local, which is what makes reusing the other windows exact.
+
+    On GPU, re-scored windows run in smaller batches than in the full search;
+    with :func:`enable_determinism` the difference is at float32 rounding level.
+    """
+
+    def __init__(self, model, windows: CadenceWindows, *, method: str, rule: SelectionRule,
+                 freq_step_hz: float, fch1_mhz: float, probe_seed: int, batch_size: int,
+                 device: str, num_workers: int, log: Log = print):
+        self.model, self.windows, self.method, self.rule = model, windows, method, rule
+        self._select_args = dict(method=method, rule=rule, freq_step_hz=freq_step_hz,
+                                 fch1_mhz=fch1_mhz, probe_seed=probe_seed,
+                                 batch_size=batch_size, device=device)
+        self.batch_size, self.device = batch_size, device
+        self.scores = score_windows(model, windows, [method], batch_size=batch_size,
+                                    num_workers=num_workers, device=device, log=log)[method]
+        self.cache = AmapCache()
+        self.background = select_candidates(
+            self.scores, windows.f_starts, model=model, windows=windows,
+            amap_cache=self.cache, log=log, **self._select_args)
+
+    def search(self, patch: Patch, log: Log = lambda _: None) -> Tuple[MethodResult, np.ndarray]:
+        """Candidates and window scores of the cadence modified by ``patch``."""
+        patched = PatchedWindows(self.windows, patch)
+        scores = self.scores.copy()
+        idx = patched.affected
+        for b in range(0, len(idx), self.batch_size):
+            chunk = idx[b:b + self.batch_size]
+            x = _to_tensor([patched.window(int(self.windows.f_starts[i])) for i in chunk], self.device)
+            with torch.no_grad():
+                s = self.model.anomaly_score(x, method=self.method).cpu().numpy()
+            scores[chunk] = [float(v) for v in s]
+        stale = frozenset(int(f) for f in self.windows.f_starts[idx])
+        result = select_candidates(
+            scores, self.windows.f_starts, model=self.model, windows=patched,
+            amap_cache=self.cache, stale=stale, log=log, **self._select_args)
+        return result, scores
 
 
 def rank_for_export(result: MethodResult, ignore_short_list: bool = False,
