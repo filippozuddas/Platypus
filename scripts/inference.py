@@ -28,6 +28,7 @@ import argparse
 import csv
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import matplotlib
@@ -43,10 +44,12 @@ sys.path.insert(0, str(ROOT))
 from src.data.torch_dataset import _load_full_obs
 from src.search import pipeline
 from src.search.export import export_candidates
+from src.data.cache import sha256_file
 from src.search.pipeline import (
-    CadenceWindows, SelectionRule, load_model, rank_for_export, read_cadence_meta,
-    robust_stats, score_windows, select_candidates,
+    CadenceWindows, SelectionRule, enable_determinism, load_model, rank_for_export,
+    read_cadence_meta, robust_stats, score_windows, select_candidates,
 )
+from src.utils.provenance import write_provenance
 
 METHODS = ["recon", "topk", "max", "cadence"]
 
@@ -101,6 +104,9 @@ def parse_args():
                         "regardless of in_short_list (off_leak). The full CSV always "
                         "contains every candidate with the short-list columns either way; "
                         "this only affects which ones get a plot.")
+    p.add_argument("--no_deterministic", action="store_true",
+                   help="Allow TF32 and non-deterministic GPU kernels (faster; scores then "
+                        "differ by ~1e-4 relative between runs). Default: bit-reproducible.")
     p.add_argument("--off_ceiling_probe", type=int, default=300,
                    help="Extra background snippets sampled across the whole cadence "
                         "(beyond the candidate clusters) to build the off_noise_ceiling "
@@ -139,6 +145,10 @@ def main():
     if args.max_cadences:
         cadence_lines = cadence_lines[:args.max_cadences]
 
+    numerics = {"deterministic": False} if args.no_deterministic else \
+        {"deterministic": True, **enable_determinism()}
+    print(f"Numerics: {numerics}")
+
     print(f"Loading model from {args.checkpoint}")
     model = load_model(args.checkpoint, model_cfg, input_shape, args.device)
 
@@ -148,6 +158,14 @@ def main():
     print(f"Batch size: {args.batch_size}, workers: {args.num_workers}")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    write_provenance(
+        args.out_dir / "provenance.json", {"data": data_cfg, "model": model_cfg},
+        checkpoint={"path": str(args.checkpoint), "sha256": sha256_file(args.checkpoint)},
+        cadence_list={"path": str(args.cadence_list), "sha256": sha256_file(args.cadence_list),
+                      "n_cadences": len(cadence_lines)},
+        methods=list(methods), selection_rule=asdict(rule),
+        numerics=numerics, batch_size=args.batch_size, top_k=args.top_k,
+    )
 
     all_scores = {m: [] for m in methods}
     all_rows = []

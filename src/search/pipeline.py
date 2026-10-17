@@ -62,6 +62,37 @@ class SelectionRule:
     leak_frac: float = 0.3
 
 
+def enable_determinism() -> Dict[str, object]:
+    """Make GPU scoring bit-reproducible across runs; returns the settings.
+
+    By default PyTorch lets cuDNN run float32 convolutions in TF32 (~3
+    significant digits) and pick algorithms whose summation order can change
+    between processes: two runs of the same search then differ by ~1e-4
+    relative on almost every score (measured on Voyager-1, 2026-10-17). This
+    forces full FP32 and deterministic kernels, at some cost in speed. Call
+    before the model is moved to the GPU (cuBLAS reads its workspace setting
+    when the CUDA context starts).
+    """
+    import os
+
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    # warn_only: an op without a deterministic kernel warns instead of failing;
+    # bit-identity of two runs is what verifies the setting.
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    return {
+        "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+        "matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "cudnn_benchmark": torch.backends.cudnn.benchmark,
+        "cudnn_deterministic": torch.backends.cudnn.deterministic,
+        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "cublas_workspace_config": os.environ["CUBLAS_WORKSPACE_CONFIG"],
+    }
+
+
 def robust_stats(scores: np.ndarray) -> Tuple[float, float]:
     """Median and Gaussian-equivalent sigma (``MAD * 1.4826``)."""
     median = np.median(scores)

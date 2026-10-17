@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 
 from src.search.pipeline import (
-    CadenceWindows, SelectionRule, preprocess_window, rank_for_export,
+    CadenceWindows, SelectionRule, enable_determinism, preprocess_window, rank_for_export,
     score_windows, select_candidates,
 )
 
@@ -131,3 +131,16 @@ def test_export_ranking_short_list_then_all(windows):
     everything, _ = rank_for_export(result, ignore_short_list=True, log=lambda _: None)
     assert len(everything) == len(result.clusters)
     assert list(everything["on_off_contrast"]) == sorted(everything["on_off_contrast"], reverse=True)
+
+
+def test_enable_determinism_sets_fp32_deterministic_kernels():
+    before = (torch.backends.cudnn.allow_tf32, torch.backends.cudnn.deterministic,
+              torch.are_deterministic_algorithms_enabled(), torch.backends.cuda.matmul.allow_tf32)
+    try:
+        settings = enable_determinism()
+        assert settings["cudnn_allow_tf32"] is False and settings["matmul_allow_tf32"] is False
+        assert settings["cudnn_deterministic"] is True and settings["deterministic_algorithms"] is True
+    finally:
+        torch.backends.cudnn.allow_tf32, torch.backends.cudnn.deterministic = before[:2]
+        torch.use_deterministic_algorithms(before[2])
+        torch.backends.cuda.matmul.allow_tf32 = before[3]
