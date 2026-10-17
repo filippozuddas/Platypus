@@ -169,6 +169,12 @@ class CadenceWindows:
     def window(self, f_start: int) -> np.ndarray:
         return preprocess_window(self._obs, f_start, self.fchans, self.tchans, self.preproc)
 
+    def raw_block(self, c0: int, c1: int) -> np.ndarray:
+        """Copy of the raw data in channels ``[c0, c1)``: ``(n_obs, ntime, c1 - c0)``."""
+        if c0 < 0 or c1 > self.nchans:
+            raise ValueError(f"channels [{c0}, {c1}) outside [0, {self.nchans})")
+        return np.stack([np.array(o[:, c0:c1]) for o in self._obs])
+
     def iter_windows(self, f_starts: Sequence[int], num_workers: int,
                      chunksize: int) -> Iterator[Tuple[int, np.ndarray]]:
         """``(f_start, window)`` in input order, preprocessed by a spawn pool."""
