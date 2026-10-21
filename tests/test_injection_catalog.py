@@ -8,7 +8,9 @@ import pytest
 import yaml
 
 from src.data.morphologies import MORPHOLOGIES
-from src.search.injection import Catalog, build_catalog, build_patch
+from src.search.injection import (
+    Catalog, build_catalog, build_patch, night_groups, select_rows_per_night,
+)
 from src.search.pipeline import CadenceWindows, PatchedWindows
 
 FCHANS, TCHANS, NCHANS, NTIME = 1024, 96, 40960, 16
@@ -118,3 +120,28 @@ def test_changed_injector_is_detected(tmp_path, manifest, data_cfg, cadence_wind
     tampered = inj.__class__(**{**inj.__dict__, "site_meta": json.dumps(meta, sort_keys=True)})
     with pytest.raises(ValueError, match="injector changed"):
         build_patch(windows, tampered, data_cfg, fch1_mhz=FCH1_MHZ, foff_mhz=FOFF_MHZ)
+
+
+def _guppi_manifest(rows):
+    """Manifest lines named like real 0000 files: (node, mjd, seconds) per row."""
+    return [[f"/d/{node}_guppi_{mjd}_{sec + 320 * o:05d}_SRC_{o:04d}.rawspec.0000.h5"
+             for o in range(6)] for node, mjd, sec in rows]
+
+
+def test_rows_per_night_is_balanced_spread_and_seeded():
+    # Night 1 crosses UTC midnight (one night, two MJDs); night 2 is small.
+    rows = ([(f"blc0{n}", 60000, 80000 + 1000 * c) for c in range(4) for n in range(1, 4)]
+            + [(f"blc0{n}", 60001, 2000 + 1000 * c) for c in range(2) for n in range(1, 4)]
+            + [("blc41", 60010, 30000), ("blc42", 60010, 30000)])
+    cad = _guppi_manifest(rows)
+    nights = night_groups(cad)
+    assert [len(n) for n in nights] == [18, 2]
+
+    sel = select_rows_per_night(cad, per_night=6, seed=3)
+    assert sel == select_rows_per_night(cad, per_night=6, seed=3)
+    first = [r for r in sel if r in nights[0]]
+    assert len(first) == 6 and set(sel) - set(first) == set(nights[1])
+    assert {cad[r][0].split("/")[-1][:5] for r in first} == {"blc01", "blc02", "blc03"}
+    assert all(sum(cad[r][0].split("/")[-1].startswith(n) for r in first) == 2
+               for n in ("blc01", "blc02", "blc03"))
+    assert select_rows_per_night(cad, per_night=6, seed=4) != sel

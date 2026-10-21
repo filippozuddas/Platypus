@@ -75,6 +75,59 @@ def _hash_seed(*parts) -> int:
     return int.from_bytes(digest[:4], "big")
 
 
+def _obs_start_mjd(path: str) -> float:
+    """MJD of an observation's start from its GUPPI name (``blcNN_guppi_MJD_SEC_...``);
+    the 2026-10-12 header check found it equal to the header ``tstart`` for every file."""
+    parts = Path(path).name.split("_")
+    return int(parts[2]) + int(parts[3]) / 86400
+
+
+def night_groups(cadences: Sequence[Sequence[str]], gap_hours: float = 12.0) -> List[List[int]]:
+    """Manifest rows grouped into observing nights, in time order.
+
+    A new night starts where consecutive cadence start times are more than
+    ``gap_hours`` apart (the 0000 split found at most 4.7 h within a night and
+    at least 28 h between nights).
+    """
+    order = sorted(range(len(cadences)), key=lambda r: _obs_start_mjd(cadences[r][0]))
+    nights: List[List[int]] = []
+    last = None
+    for r in order:
+        t = _obs_start_mjd(cadences[r][0])
+        if last is None or (t - last) * 24 > gap_hours:
+            nights.append([])
+        nights[-1].append(r)
+        last = t
+    return [sorted(n) for n in nights]
+
+
+def select_rows_per_night(cadences: Sequence[Sequence[str]], per_night: int, seed: int,
+                          gap_hours: float = 12.0) -> List[int]:
+    """``per_night`` rows from each observing night (all of a smaller night),
+    drawn from a seed and the rows' identities, never from model outputs.
+
+    Within a night, rows are taken round-robin over compute nodes (``blcNN``,
+    i.e. frequency sub-bands) in seeded order, so the selection spreads across
+    the band instead of piling onto one node.
+    """
+    selected: List[int] = []
+    for night in night_groups(cadences, gap_hours):
+        key = cadence_key(cadences[min(night, key=lambda r: _obs_start_mjd(cadences[r][0]))])
+        rng = np.random.default_rng(_hash_seed(seed, key, "rows"))
+        by_node: Dict[str, List[int]] = {}
+        for r in night:
+            by_node.setdefault(Path(cadences[r][0]).name.split("_")[0], []).append(r)
+        queues = [list(rng.permutation(by_node[n])) for n in sorted(by_node)]
+        queues = [queues[i] for i in rng.permutation(len(queues))]
+        picked: List[int] = []
+        while len(picked) < per_night and any(queues):
+            for q in queues:
+                if q and len(picked) < per_night:
+                    picked.append(int(q.pop(0)))
+        selected.extend(picked)
+    return sorted(selected)
+
+
 def _sample_site_meta(morphology: str, site_seed: int, data_cfg: dict,
                       fchans: int, tchans: int):
     injector = build_morphology(morphology, data_cfg, seed=site_seed)
@@ -105,8 +158,13 @@ class Injection:
 def build_catalog(out_dir: Path, *, manifest: Path, data_cfg: dict, seed: int,
                   morphologies: Sequence[str], snr_list: Sequence[float],
                   on_patterns: Sequence[str], n_sites: int,
-                  rows: Optional[Sequence[int]] = None, edge_margin: int = 0) -> Path:
-    """Write a new catalog directory (never overwritten). Returns its catalog.json."""
+                  rows: Optional[Sequence[int]] = None, edge_margin: int = 0,
+                  row_selection: Optional[dict] = None) -> Path:
+    """Write a new catalog directory (never overwritten). Returns its catalog.json.
+
+    ``row_selection`` records how ``rows`` were chosen (e.g. the rule of
+    :func:`select_rows_per_night`) in catalog.json.
+    """
     out_dir = Path(out_dir)
     if out_dir.exists():
         raise FileExistsError(f"{out_dir} already exists; catalogs are never overwritten")
@@ -148,6 +206,7 @@ def build_catalog(out_dir: Path, *, manifest: Path, data_cfg: dict, seed: int,
         "manifest": {"path": str(manifest), "sha256": sha256_file(manifest),
                      "n_rows": len(cadences)},
         "rows": rows,
+        "row_selection": row_selection,
         "geometry": {"fchans": fchans, "tchans": tchans, "nchans": nchans, "n_obs": N_OBS},
         "edge_margin": edge_margin,
         "n_sites": n_sites,

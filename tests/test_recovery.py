@@ -73,6 +73,36 @@ def test_control_without_injection_reports_the_background(search):
         assert len(result.clusters) == len(search.background.clusters)
 
 
+def test_controls_reuse_the_background_without_a_research(search, tmp_path, monkeypatch):
+    with open("configs/data/gbt_fine_nightsplit.yaml") as f:
+        data_cfg = yaml.safe_load(f)
+    data_cfg["raw"]["nchans"] = NCHANS
+    manifest = tmp_path / "manifest.txt"
+    manifest.write_text(" ".join(f"/data/cad0_obs{o}.h5" for o in range(6)) + "\n")
+    build_catalog(tmp_path / "cat", manifest=manifest, data_cfg=data_cfg, seed=3,
+                  morphologies=list(MORPHOLOGIES), snr_list=[0], on_patterns=["3on", "1on_2"],
+                  n_sites=3)
+    injections = list(Catalog(tmp_path / "cat").injections(row=0))
+    expected = {}
+    for inj in injections:
+        lo = inj.window_c0
+        expected[inj.injection_id] = _outcome(search, Patch(c0=0, data={}), lo, lo + FCHANS)[0]
+
+    calls = []
+    real = search.search
+    monkeypatch.setattr(search, "search", lambda patch, **kw: calls.append(1) or real(patch, **kw))
+    out_csv = tmp_path / "injections.csv"
+    run_injections(search, injections, data_cfg, fch1_mhz=8000.0, foff_mhz=-2.79e-6,
+                   out_csv=out_csv, top_k=TOP_K, log=lambda _: None)
+    assert not calls
+    with open(out_csv, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == len(injections) and all(r["control"] == "True" for r in rows)
+    as_csv = lambda v: "" if v is None else str(v)
+    for r in rows:
+        assert all(r[k] == as_csv(v) for k, v in expected[r["injection_id"]].items())
+
+
 def test_on_only_injection_in_a_quiet_band_is_recovered(search, cadence):
     patch, lo, hi = _lines(cadence, [23_000])
     out, _ = _outcome(search, patch, lo, hi)

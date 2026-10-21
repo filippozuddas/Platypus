@@ -141,6 +141,7 @@ def run_injections(search: CadenceSearch, injections: Iterable[Injection], data_
     done = _done_ids(out_csv)
     new_file = not out_csv.exists()
     fchans = search.windows.fchans
+    control_outcomes: dict = {}
     n = 0
     with open(out_csv, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=OUTCOME_COLUMNS)
@@ -151,12 +152,22 @@ def run_injections(search: CadenceSearch, injections: Iterable[Injection], data_
                 continue
             patch, record = build_patch(search.windows, inj, data_cfg,
                                         fch1_mhz=fch1_mhz, foff_mhz=foff_mhz)
-            result, scores = search.search(patch)
             control = record["span_lo"] is None
             lo, hi = ((record["window_c0"], record["window_c1"]) if control
                       else (record["span_lo"], record["span_hi"]))
-            outcome = associate(result, search.background, scores, search.windows.f_starts,
-                                fchans, lo, hi, top_k=top_k)
+            if control:
+                # Nothing was injected, so the search result is the background
+                # itself and the outcome is the same for every morphology and ON
+                # pattern at this site: associate it once per region.
+                if (lo, hi) not in control_outcomes:
+                    control_outcomes[(lo, hi)] = associate(
+                        search.background, search.background, search.scores,
+                        search.windows.f_starts, fchans, lo, hi, top_k=top_k)
+                outcome = control_outcomes[(lo, hi)]
+            else:
+                result, scores = search.search(patch)
+                outcome = associate(result, search.background, scores, search.windows.f_starts,
+                                    fchans, lo, hi, top_k=top_k)
             info = {k: v for k, v in record.items()
                     if k not in ("injection_id", "window_c0", "window_c1", "on_pattern",
                                  "span_lo", "span_hi", "freq_mhz_at_span_lo", "freq_mhz_at_span_hi")}
