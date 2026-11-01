@@ -74,15 +74,19 @@ def make_search(cadence, tmp_path):
 
 
 RULE = SelectionRule(far_quantile=0.95, off_ceiling_probe=20)
+# Quota plus the local test: half-width scaled to the 79-window toy cadence.
+HYBRID = SelectionRule(far_quantile=0.95, off_ceiling_probe=20, cfar_half=4, cfar_k=3.0,
+                       leak_ref="weakest_hit_on")
 
 
-def test_unchanged_patch_reproduces_the_background(cadence, make_search, tmp_path):
-    search = make_search(RULE)
+@pytest.mark.parametrize("rule", [RULE, HYBRID], ids=["quota", "hybrid"])
+def test_unchanged_patch_reproduces_the_background(cadence, make_search, tmp_path, rule):
+    search = make_search(rule)
     identity = Patch(c0=5000, data={0: cadence[0][:, 5000:5100].copy()})
     result, scores = search.search(identity)
     _assert_same(result, search.background)
     np.testing.assert_array_equal(scores, search.scores)
-    full, _ = _full_search(cadence, Patch(c0=0, data={}), RULE, tmp_path)
+    full, _ = _full_search(cadence, Patch(c0=0, data={}), rule, tmp_path)
     _assert_same(search.background, full)
 
 
@@ -90,11 +94,12 @@ def test_unchanged_patch_reproduces_the_background(cadence, make_search, tmp_pat
                                   PERSISTENT_CHAN + 700,    # next to a persistent RFI cluster
                                   ON_ONLY_CHAN + 600,       # extends an existing cluster
                                   32, NCHANS - 32])         # band edges
-def test_incremental_equals_full_search(cadence, make_search, tmp_path, chan):
-    search = make_search(RULE)
+@pytest.mark.parametrize("rule", [RULE, HYBRID], ids=["quota", "hybrid"])
+def test_incremental_equals_full_search(cadence, make_search, tmp_path, chan, rule):
+    search = make_search(rule)
     patch = _on_only_line(cadence, chan)
     result, scores = search.search(patch)
-    full, full_scores = _full_search(cadence, patch, RULE, tmp_path)
+    full, full_scores = _full_search(cadence, patch, rule, tmp_path)
     np.testing.assert_array_equal(scores, full_scores)
     _assert_same(result, full)
 
@@ -112,6 +117,19 @@ def test_injection_in_a_quiet_band_becomes_a_short_listed_cluster(cadence, make_
     hit = at(result.clusters, 20_000)
     assert len(hit) == 1 and bool(hit.iloc[0].in_short_list)
     assert bool(at(result.clusters, ON_ONLY_CHAN).iloc[0].in_short_list)
+
+
+def test_local_test_admits_a_signal_the_filled_quota_hides(cadence, make_search):
+    # RULE's 5% quota (4 windows) is spent on the two existing lines, so a new
+    # line in a quiet band forms no candidate; the local test admits it.
+    def at(clusters, chan):
+        return clusters[(clusters.f_start_first <= chan) & (clusters.f_start_last + FCHANS > chan)]
+
+    quota, _ = make_search(RULE).search(_on_only_line(cadence, 20_000))
+    hybrid, _ = make_search(HYBRID).search(_on_only_line(cadence, 20_000))
+    assert len(at(quota.clusters, 20_000)) == 0
+    assert len(at(hybrid.clusters, 20_000)) == 1
+    assert hybrid.thresholds["n_stage1"] > quota.thresholds["n_stage1"]
 
 
 def test_probe_window_modified_forces_recompute(cadence, make_search, tmp_path):

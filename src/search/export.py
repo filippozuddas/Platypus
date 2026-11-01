@@ -19,17 +19,18 @@ from src.utils.visualization import plot_candidate  # noqa: E402
 
 
 def export_candidates(ranked: pd.DataFrame, amaps: List[Optional[np.ndarray]], *, model,
-                      windows: CadenceWindows, method: str, top_k: int, plot_format: str,
+                      windows: CadenceWindows, method: str, top_k: Optional[int], plot_format: str,
                       cad_dir: Path, median: float, mad_sigma: float, cad_idx: int,
                       target: str, freq_step_hz: float, fch1_mhz: float,
                       nchans_total: int, obs_date: str, device: str) -> int:
     """Plot the first ``top_k`` rows of ``ranked`` (the :func:`rank_for_export`
-    order) to ``{method}_candidates.pdf`` and/or per-candidate PNGs.
+    order; every row when ``top_k`` is None) to ``{method}_candidates.pdf``
+    and/or per-candidate PNGs.
 
     Returns the number of candidates plotted. Backbones without an anomaly map
     get original | reconstruction | error panels instead.
     """
-    top = ranked.head(top_k).reset_index(drop=True)
+    top = (ranked if top_k is None else ranked.head(top_k)).reset_index(drop=True)
     want_pdf = plot_format in ("pdf", "both")
     want_png = plot_format in ("png", "both")
     pdf = PdfPages(cad_dir / f"{method}_candidates.pdf") if want_pdf and len(top) > 0 else None

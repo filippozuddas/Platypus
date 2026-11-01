@@ -28,7 +28,7 @@ import argparse
 import csv
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import matplotlib
@@ -46,7 +46,7 @@ from src.search import pipeline
 from src.search.export import export_candidates
 from src.data.cache import sha256_file
 from src.search.pipeline import (
-    CadenceWindows, SelectionRule, enable_determinism, load_model, rank_for_export,
+    RULES, CadenceWindows, SelectionRule, enable_determinism, load_model, rank_for_export,
     read_cadence_meta, robust_stats, score_windows, select_candidates,
 )
 from src.utils.provenance import write_provenance
@@ -88,8 +88,11 @@ def parse_args():
     p.add_argument("--max_cadences", type=int, default=None)
     p.add_argument("--batch_size", type=int, default=512)
     p.add_argument("--num_workers", type=int, default=16)
-    p.add_argument("--top_k", type=int, default=30,
-                   help="Number of top candidates to plot per cadence per method")
+    p.add_argument("--top_k", type=int, default=None,
+                   help="Cap on plotted candidates per cadence per method (default: the "
+                        "whole short list; give one with --ignore_short_list)")
+    p.add_argument("--rule", default="production", choices=list(RULES),
+                   help="Named candidate-selection rule (src/search/pipeline.py: RULES).")
     p.add_argument("--plot_format", default="pdf", choices=["pdf", "png", "both"],
                    help="Candidate plot output: one multi-page PDF per cadence per "
                         "method (fast vetting, default), individual PNGs (old "
@@ -130,7 +133,7 @@ def main():
     df = data_cfg["raw"]["df"]
     nchans_total = data_cfg["raw"]["nchans"]
     input_shape = (tchans, fchans, 1)
-    rule = SelectionRule(off_ceiling_probe=args.off_ceiling_probe)
+    rule = replace(RULES[args.rule], off_ceiling_probe=args.off_ceiling_probe)
 
     with open(args.model_config) as f:
         model_cfg = yaml.safe_load(f)
@@ -163,7 +166,7 @@ def main():
         checkpoint={"path": str(args.checkpoint), "sha256": sha256_file(args.checkpoint)},
         cadence_list={"path": str(args.cadence_list), "sha256": sha256_file(args.cadence_list),
                       "n_cadences": len(cadence_lines)},
-        methods=list(methods), selection_rule=asdict(rule),
+        methods=list(methods), rule=args.rule, selection_rule=asdict(rule),
         numerics=numerics, batch_size=args.batch_size, top_k=args.top_k,
     )
 

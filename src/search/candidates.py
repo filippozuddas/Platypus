@@ -8,10 +8,53 @@ Design rationale, hand-validated thresholds and rejected alternatives:
 ``docs/04_candidate-filtering.md``.
 """
 
+from typing import Optional, Tuple
+
 import numpy as np
 import pandas as pd
+from scipy.ndimage import median_filter
 
-__all__ = ["cluster_candidates", "on_off_contrast", "full_row_hits", "off_noise_ceiling"]
+__all__ = ["cluster_candidates", "on_off_contrast", "full_row_hits", "off_noise_ceiling",
+           "local_stats", "update_local_stats"]
+
+MAD_SCALE = 1.4826
+
+
+def local_stats(scores: np.ndarray, half: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Local median and robust sigma of window scores along frequency.
+
+    For each window, the median ``b`` of the scores within ``half`` windows on
+    either side (itself included) and ``m = 1.4826 * MAD`` of ``scores - b``
+    over the same span: the reference cells of an order-statistic CFAR test.
+    ``(scores - b) / m`` is a window's excess over its own neighbourhood, so a
+    signal inside a band of persistent RFI is compared with that band and not
+    with the whole cadence. ``scores`` must be in ``f_start`` order.
+    """
+    scores = np.asarray(scores, dtype=np.float64)
+    size = 2 * half + 1
+    b = median_filter(scores, size=size, mode="nearest")
+    m = median_filter(np.abs(scores - b), size=size, mode="nearest") * MAD_SCALE + 1e-9
+    return b, m
+
+
+def update_local_stats(b: np.ndarray, m: np.ndarray, scores: np.ndarray, lo: int, hi: int,
+                       half: int) -> Tuple[np.ndarray, np.ndarray]:
+    """:func:`local_stats` of ``scores`` when only indices ``lo..hi`` changed.
+
+    ``b``/``m`` are the statistics before the change. ``b`` can only move within
+    ``half`` of the changed span and ``m`` within ``2 * half``; recomputing a
+    slice reaching ``4 * half`` out keeps every spliced value exact, so the
+    result equals a full :func:`local_stats` call.
+    """
+    n = len(scores)
+    s0, s1 = max(0, lo - 4 * half), min(n, hi + 4 * half + 1)
+    bs, ms = local_stats(scores[s0:s1], half)
+    b, m = b.copy(), m.copy()
+    b0, b1 = max(0, lo - half), min(n, hi + half + 1)
+    m0, m1 = max(0, lo - 2 * half), min(n, hi + 2 * half + 1)
+    b[b0:b1] = bs[b0 - s0:b1 - s0]
+    m[m0:m1] = ms[m0 - s0:m1 - s0]
+    return b, m
 
 
 def off_noise_ceiling(
@@ -86,6 +129,7 @@ def cluster_candidates(
     fchans: int,
     df: float = 0.0,
     fch1_mhz: float = 0.0,
+    above: Optional[np.ndarray] = None,
 ) -> pd.DataFrame:
     """Group adjacent above-threshold snippets into distinct candidates.
 
@@ -113,6 +157,9 @@ def cluster_candidates(
             added to the ``f_start``-derived offset so ``freq_mhz_peak`` is a
             real frequency, not just an offset from the start of the file's
             frequency axis (0 = report the in-file offset only).
+        above: optional ``(N,)`` boolean mask, same order as ``f_starts``, of
+            the snippets that form candidates; replaces ``score > threshold``
+            when the selection is not a single scalar cut.
 
     Returns:
         DataFrame, one row per cluster, sorted by ``peak_score`` descending:
@@ -130,7 +177,7 @@ def cluster_candidates(
     order = np.argsort(f_starts)
     f_starts, scores = f_starts[order], scores[order]
 
-    above = scores > threshold
+    above = scores > threshold if above is None else np.asarray(above, dtype=bool)[order]
     if not above.any():
         return pd.DataFrame(columns=columns)
 
@@ -217,6 +264,7 @@ def full_row_hits(
     on_rows=(0, 2, 4),
     off_rows=(1, 3, 5),
     leak_frac: float = 0.3,
+    leak_ref: str = "weakest_on",
 ) -> dict:
     """Row-level ON/OFF hit counts with no column restriction, for short-list
     volume reduction.
@@ -244,6 +292,12 @@ def full_row_hits(
         leak_frac: minimum fraction of the weakest ON row's peak an OFF row's
             peak must reach (in addition to clearing ``threshold``) to count
             as a leak hit.
+        leak_ref: which ON row is "the weakest". ``weakest_on`` (historical):
+            the weakest of all ON rows — for a signal in two ON scans that is
+            the empty one, so the magnitude gate vanishes and any two OFF rows
+            above ``threshold`` reject it. ``weakest_hit_on``: the weakest ON
+            row above ``threshold`` (all ON rows if none is), so the gate
+            compares OFF leakage with the scans that actually hold the signal.
 
     Returns:
         dict with ``n_on_hits_full``, ``n_off_hits_full``, ``off_leak``,
@@ -257,7 +311,11 @@ def full_row_hits(
 
     n_on_hits_full = int((on_row_max > threshold).sum())
 
-    on_ref = float(on_row_max.min()) if on_row_max.size else 0.0
+    if leak_ref not in ("weakest_on", "weakest_hit_on"):
+        raise ValueError(f"unknown leak_ref {leak_ref!r}")
+    hits = on_row_max[on_row_max > threshold]
+    ref_rows = hits if leak_ref == "weakest_hit_on" and hits.size else on_row_max
+    on_ref = float(ref_rows.min()) if ref_rows.size else 0.0
     leak_mask = (off_row_max > threshold) & (off_row_max >= leak_frac * on_ref)
     n_off_hits_full = int(leak_mask.sum())
     off_leak = n_off_hits_full >= 2

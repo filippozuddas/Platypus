@@ -188,3 +188,14 @@ def test_driver_writes_resumable_outcomes_and_background(search, tmp_path):
     np.testing.assert_array_equal(scores["score"], search.scores)
     maps = np.load(tmp_path / "bg" / "background_maps.npz")
     assert maps["amap"].shape == (len(search.background.clusters), 6, 64)
+
+
+def test_outcome_carries_row_peaks_and_unbounded_export(search, cadence):
+    patch, lo, hi = _lines(cadence, [23_000])
+    result, scores = search.search(patch)
+    out = associate(result, search.background, scores, search.windows.f_starts, FCHANS,
+                    lo, hi, top_k=None)
+    assert out["in_short_list"] and out["exported"]
+    assert out["off_ceiling"] == result.thresholds["off_ceiling"]
+    i = int(np.flatnonzero(result.clusters.f_start_peak.to_numpy() == out["cluster_f_start_peak"])[0])
+    np.testing.assert_allclose([out[f"row_max_{k}"] for k in range(6)], result.amaps[i].max(axis=1))

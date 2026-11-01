@@ -26,7 +26,7 @@ Usage (server):
 import argparse
 import json
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import torch
@@ -37,7 +37,7 @@ from src.data.torch_dataset import _load_full_obs
 from src.search.export import export_candidates
 from src.search.injection import Catalog, cadence_key
 from src.search.pipeline import (
-    CadenceSearch, CadenceWindows, SelectionRule, enable_determinism, load_model,
+    RULES, CadenceSearch, CadenceWindows, enable_determinism, load_model,
     rank_for_export, read_cadence_meta,
 )
 from src.search.recovery import run_injections, write_background
@@ -61,9 +61,13 @@ def parse_args():
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--batch_size", type=int, default=512)
     p.add_argument("--num_workers", type=int, default=16)
-    p.add_argument("--off_ceiling_probe", type=int, default=SelectionRule.off_ceiling_probe)
-    p.add_argument("--top_k", type=int, default=30,
-                   help="Review budget per cadence: sets 'exported' and the PDF length.")
+    p.add_argument("--rule", default="production", choices=list(RULES),
+                   help="Named candidate-selection rule (src/search/pipeline.py: RULES).")
+    p.add_argument("--off_ceiling_probe", type=int, default=None,
+                   help="Override the rule's OFF-noise probe size.")
+    p.add_argument("--top_k", type=int, default=None,
+                   help="Cap on exported candidates per cadence (default: the whole short "
+                        "list); sets 'exported' and the PDF length.")
     p.add_argument("--export_pdf", action="store_true",
                    help="Also write the background review PDF of each cadence.")
     p.add_argument("--no_deterministic", action="store_true")
@@ -76,6 +80,7 @@ def _identity(args, rule, catalog):
         "manifest_sha256": sha256_file(args.manifest),
         "catalog_sites_sha256": catalog.meta["sites_sha256"] if catalog else None,
         "selection_rule": asdict(rule),
+        "top_k": args.top_k,
         "method": METHOD,
     }
 
@@ -87,7 +92,9 @@ def main():
     frame = data_cfg["frame"]
     fchans, tchans = frame["fchans"], frame["tchans"]
     stride = frame.get("stride_infer", fchans // 2)
-    rule = SelectionRule(off_ceiling_probe=args.off_ceiling_probe)
+    rule = RULES[args.rule]
+    if args.off_ceiling_probe is not None:
+        rule = replace(rule, off_ceiling_probe=args.off_ceiling_probe)
 
     catalog = Catalog(args.catalog) if args.catalog else None
     if catalog:
@@ -111,7 +118,7 @@ def main():
                          run_identity=identity, numerics=numerics,
                          manifest={"path": str(args.manifest), "n_rows": len(cadences)},
                          catalog=str(args.catalog) if catalog else None,
-                         batch_size=args.batch_size, top_k=args.top_k)
+                         batch_size=args.batch_size, top_k=args.top_k, rule=args.rule)
 
     model = load_model(args.checkpoint, model_cfg, (tchans, fchans, 1), args.device)
     print(f"Rows: {len(rows)}  catalog: {args.catalog}  numerics: {numerics}")

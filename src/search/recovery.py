@@ -26,7 +26,11 @@ completeness analysis, not here):
   background search (the injection joined an existing event);
 * ``in_short_list`` — the candidate passes the ON/OFF short-list rule;
 * ``export_rank``   — its position in the review order (short list by ON/OFF
-  contrast), ``exported`` if within ``top_k``;
+  contrast), ``exported`` if within ``top_k`` (every short-listed candidate
+  when ``top_k`` is None);
+* ``off_ceiling``, ``row_max_0..5`` — the cadence's row threshold and the six
+  row peaks of the associated candidate's anomaly map, from which the short-list
+  verdict can be re-decided offline under another ``leak_frac``/``leak_ref``;
 * ``reviewed``      — left empty for the human review stage.
 """
 
@@ -49,7 +53,8 @@ OUTCOME_COLUMNS = [
     "max_window_score", "far_thresh", "detected", "n_clusters_overlapping",
     "cluster_f_start_peak", "peak_in_region", "merged", "peak_score", "on_off_contrast",
     "n_on_hits_full", "n_off_hits_full", "off_leak", "in_short_list", "export_rank",
-    "exported", "reviewed", "injection_info",
+    "exported", "off_ceiling", "row_max_0", "row_max_1", "row_max_2", "row_max_3", "row_max_4",
+    "row_max_5", "reviewed", "injection_info",
 ]
 
 
@@ -59,7 +64,8 @@ def _covers(clusters: pd.DataFrame, fchans: int, lo: int, hi: int) -> np.ndarray
 
 
 def associate(result: MethodResult, background: MethodResult, scores: np.ndarray,
-              f_starts: np.ndarray, fchans: int, lo: int, hi: int, *, top_k: int) -> Dict:
+              f_starts: np.ndarray, fchans: int, lo: int, hi: int, *,
+              top_k: Optional[int]) -> Dict:
     """Per-stage outcome of the region ``[lo, hi)`` in a search result."""
     clusters = result.clusters
     in_region = (f_starts < hi) & (f_starts + fchans > lo)
@@ -69,7 +75,8 @@ def associate(result: MethodResult, background: MethodResult, scores: np.ndarray
         "n_clusters_overlapping": 0, "cluster_f_start_peak": None, "peak_in_region": False,
         "merged": False, "peak_score": None, "on_off_contrast": None, "n_on_hits_full": None,
         "n_off_hits_full": None, "off_leak": None, "in_short_list": False,
-        "export_rank": None, "exported": False, "reviewed": None,
+        "export_rank": None, "exported": False, "off_ceiling": result.thresholds.get("off_ceiling"),
+        **{f"row_max_{i}": None for i in range(6)}, "reviewed": None,
     }
     if len(clusters) == 0:
         out["detected"] = False
@@ -100,11 +107,14 @@ def associate(result: MethodResult, background: MethodResult, scores: np.ndarray
                    n_on_hits_full=int(chosen["n_on_hits_full"]),
                    n_off_hits_full=int(chosen["n_off_hits_full"]),
                    off_leak=bool(chosen["off_leak"]), in_short_list=bool(chosen["in_short_list"]))
+        amap = result.amaps[clusters.index.get_loc(chosen.name)]
+        if amap is not None:
+            out.update({f"row_max_{i}": float(v) for i, v in enumerate(np.asarray(amap).max(axis=1))})
         ranked, _ = rank_for_export(result, log=lambda _: None)
         pos = np.flatnonzero(ranked["f_start_peak"].to_numpy() == out["cluster_f_start_peak"])
         if pos.size:
             out["export_rank"] = int(pos[0])
-            out["exported"] = out["export_rank"] < top_k
+            out["exported"] = top_k is None or out["export_rank"] < top_k
     return out
 
 
@@ -131,7 +141,7 @@ def _done_ids(path: Path) -> set:
 
 
 def run_injections(search: CadenceSearch, injections: Iterable[Injection], data_cfg: dict, *,
-                   fch1_mhz: float, foff_mhz: float, out_csv: Path, top_k: int,
+                   fch1_mhz: float, foff_mhz: float, out_csv: Path, top_k: Optional[int],
                    log=print) -> int:
     """Search the cadence once per injection and append its outcome to ``out_csv``.
 

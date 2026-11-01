@@ -35,13 +35,20 @@ import torch
 from src.data.preprocessing import bandpass_correct, core_transform
 from src.models.autoencoder import build_autoencoder
 from src.search.candidates import (
-    cluster_candidates, full_row_hits, off_noise_ceiling, on_off_contrast,
+    cluster_candidates, full_row_hits, local_stats, off_noise_ceiling, on_off_contrast,
+    update_local_stats,
 )
 
 MAD_SCALE = 1.4826
 OFF_ROWS = (1, 3, 5)
 
 Log = Callable[[str], None]
+
+
+# Local-excess threshold of hybrid_v1, calibrated on the 299-row development
+# scan (production model) so that, with the 0.5% quota, 1% of all development
+# windows form candidates — the production total.
+CFAR_K_HYBRID_V1 = 6.7926
 
 
 @dataclass(frozen=True)
@@ -54,12 +61,33 @@ class SelectionRule:
     min_off_pool: minimum pooled OFF cells for a robust ceiling estimate;
         below it the ceiling falls back to ``thresh_5``.
     leak_frac: ``full_row_hits`` magnitude gate for an OFF row to count as leak.
+    cfar_half, cfar_k: when ``cfar_half > 0``, a window also forms candidates
+        if its score exceeds the median of its ``cfar_half`` neighbours on each
+        side by ``cfar_k`` robust sigmas (:func:`~src.search.candidates.local_stats`),
+        so a fixed per-cadence quota spent by RFI does not hide a signal that
+        stands out locally. ``0`` keeps the quota alone.
+    leak_ref: ``full_row_hits`` reference ON row for the leak magnitude gate.
     """
 
     far_quantile: float = 0.99
     off_ceiling_probe: int = 300
     min_off_pool: int = 30
     leak_frac: float = 0.3
+    cfar_half: int = 0
+    cfar_k: float = 0.0
+    leak_ref: str = "weakest_on"
+
+
+#: Named selection rules. ``production`` is the rule of the 2026-10 runs
+#: (04b scan, devcal_v1 injections). ``hybrid_v1`` halves the quota and adds the
+#: local test, with ``cfar_k`` set on the development scan so the total number
+#: of windows forming candidates stays 1%, and references the leak gate to the
+#: ON scans holding the signal.
+RULES: Dict[str, SelectionRule] = {
+    "production": SelectionRule(),
+    "hybrid_v1": SelectionRule(far_quantile=0.995, cfar_half=256, cfar_k=CFAR_K_HYBRID_V1,
+                               leak_ref="weakest_hit_on"),
+}
 
 
 def enable_determinism() -> Dict[str, object]:
@@ -297,6 +325,7 @@ def select_candidates(scores: np.ndarray, f_starts: np.ndarray, *, model, window
                       method: str, rule: SelectionRule, freq_step_hz: float, fch1_mhz: float,
                       probe_seed: int, batch_size: int, device: str,
                       amap_cache: Optional["AmapCache"] = None, stale: frozenset = frozenset(),
+                      local: Optional[Tuple[np.ndarray, np.ndarray]] = None,
                       log: Log = print) -> MethodResult:
     """Thresholds, clustering, cluster anomaly maps, OFF-noise ceiling and
     short-list membership for one method's window scores on one cadence.
@@ -307,6 +336,10 @@ def select_candidates(scores: np.ndarray, f_starts: np.ndarray, *, model, window
     stored. Maps are computed exactly as without a cache (cluster peaks one
     window at a time, the probe in its own batches), so the result is the
     same either way.
+
+    ``local`` passes precomputed :func:`~src.search.candidates.local_stats` of
+    ``scores`` (``CadenceSearch`` updates them incrementally); otherwise they
+    are computed here when the rule has a local test.
     """
     stride, fchans = windows.stride, windows.fchans
     median, mad_sigma = robust_stats(scores)
@@ -320,20 +353,29 @@ def select_candidates(scores: np.ndarray, f_starts: np.ndarray, *, model, window
 
     # Operating point: empirical quantile of this cadence's own score pool.
     far_thresh = float(np.quantile(scores, rule.far_quantile))
-    n_far = (scores > far_thresh).sum()
+    above = scores > far_thresh
+    n_far = int(above.sum())
     log(f"  {method}: median={median:.4f}  MAD_s={mad_sigma:.4f}  "
         f"3s(ref)={thresh_3:.4f}->{n_3s}  5s(ref)={thresh_5:.4f}->{n_5s}  "
-        f"FAR{100 * (1 - rule.far_quantile):.0f}%={far_thresh:.4f}->{n_far}")
+        f"FAR{100 * (1 - rule.far_quantile):g}%={far_thresh:.4f}->{n_far}")
+    if rule.cfar_half > 0:
+        if np.any(np.diff(f_starts) <= 0):
+            raise ValueError("the local test needs scores in increasing f_start order")
+        b, m = local if local is not None else local_stats(scores, rule.cfar_half)
+        above = above | ((scores - b) / m > rule.cfar_k)
+        log(f"  {method}: local excess > {rule.cfar_k:.3f} sigma (+-{rule.cfar_half} windows) "
+            f"-> {int(above.sum())} windows forming candidates")
 
     # Frequency-adjacency dedup: one wide/strong line triggers many adjacent
     # overlapping windows (stride < fchans); collapse them into one candidate.
     clusters = cluster_candidates(f_starts, scores, far_thresh, stride, fchans,
-                                  freq_step_hz, fch1_mhz=fch1_mhz)
+                                  freq_step_hz, fch1_mhz=fch1_mhz, above=above)
     log(f"  {method}: {len(clusters)} distinct candidates after "
-        f"frequency-adjacency dedup (from {n_far} raw threshold-crossings)")
+        f"frequency-adjacency dedup (from {int(above.sum())} raw threshold-crossings)")
 
     thresholds = {"median": median, "mad_sigma": mad_sigma, "thresh_3": thresh_3,
-                  "thresh_5": thresh_5, "far_thresh": far_thresh}
+                  "thresh_5": thresh_5, "far_thresh": far_thresh,
+                  "n_stage1": float(above.sum())}
     amaps: List[Optional[np.ndarray]] = [None] * len(clusters)
     if not hasattr(model, "anomaly_map") or len(clusters) == 0:
         return MethodResult(method, clusters, amaps, thresholds)
@@ -401,7 +443,8 @@ def select_candidates(scores: np.ndarray, f_starts: np.ndarray, *, model, window
         stats = on_off_contrast(amap_c, threshold=off_ceiling)
         for k in ("on_off_contrast", "on_mean", "off_mean", "n_on_hits", "n_off_hits"):
             columns[k].append(stats[k])
-        fr = full_row_hits(amap_c, threshold=off_ceiling, leak_frac=rule.leak_frac)
+        fr = full_row_hits(amap_c, threshold=off_ceiling, leak_frac=rule.leak_frac,
+                           leak_ref=rule.leak_ref)
         for k in ("n_on_hits_full", "n_off_hits_full", "off_leak", "in_short_list"):
             columns[k].append(fr[k])
     for k, v in columns.items():
@@ -511,9 +554,10 @@ class CadenceSearch:
         self.scores = score_windows(model, windows, [method], batch_size=batch_size,
                                     num_workers=num_workers, device=device, log=log)[method]
         self.cache = AmapCache()
+        self.local = local_stats(self.scores, rule.cfar_half) if rule.cfar_half > 0 else None
         self.background = select_candidates(
             self.scores, windows.f_starts, model=model, windows=windows,
-            amap_cache=self.cache, log=log, **self._select_args)
+            amap_cache=self.cache, local=self.local, log=log, **self._select_args)
 
     def search(self, patch: Patch, log: Log = lambda _: None) -> Tuple[MethodResult, np.ndarray]:
         """Candidates and window scores of the cadence modified by ``patch``."""
@@ -527,9 +571,13 @@ class CadenceSearch:
                 s = self.model.anomaly_score(x, method=self.method).cpu().numpy()
             scores[chunk] = [float(v) for v in s]
         stale = frozenset(int(f) for f in self.windows.f_starts[idx])
+        local = self.local
+        if local is not None and len(idx):
+            local = update_local_stats(*local, scores, int(np.min(idx)), int(np.max(idx)),
+                                       self.rule.cfar_half)
         result = select_candidates(
             scores, self.windows.f_starts, model=self.model, windows=patched,
-            amap_cache=self.cache, stale=stale, log=log, **self._select_args)
+            amap_cache=self.cache, stale=stale, local=local, log=log, **self._select_args)
         return result, scores
 
 
