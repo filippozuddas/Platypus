@@ -8,7 +8,7 @@ import pytest
 from src.search.candidates import (
     cluster_candidates, full_row_hits, local_stats, update_local_stats,
 )
-from src.search.pipeline import RULES, SelectionRule
+from src.search.pipeline import NOTCH_MHZ, RULES, SelectionRule, usable_windows
 from src.search.veto import count_other_targets, same_session_rows
 
 
@@ -59,6 +59,18 @@ def test_named_rules():
     h = RULES["hybrid_v1"]
     assert h.cfar_half > 0 and np.isfinite(h.cfar_k) and h.far_quantile > 0.99
     assert h.leak_ref == "weakest_hit_on"
+    assert RULES["hybrid_v2"].exclude_mhz == NOTCH_MHZ
+    assert RULES["hybrid_v2"].cfar_k == h.cfar_k and h.exclude_mhz == ()
+
+
+def test_usable_windows_follow_the_signed_frequency_axis():
+    f_starts = np.arange(0, 100_000, 512)
+    # fch1 1350 MHz, negative step of 1 kHz/channel: channel c is at 1350 - c/1000 MHz.
+    u = usable_windows(f_starts, 1024, -1000.0, 1350.0, ((1200.0, 1341.2),))
+    lo_mhz = 1350.0 - (f_starts + 1024) / 1000.0
+    hi_mhz = 1350.0 - f_starts / 1000.0
+    np.testing.assert_array_equal(u, ~((hi_mhz > 1200.0) & (lo_mhz < 1341.2)))
+    assert u[0] and not u[100] and usable_windows(f_starts, 1024, -1000.0, 1350.0, ()).all()
 
 
 def test_cross_target_counts_and_sessions():

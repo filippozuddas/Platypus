@@ -23,7 +23,7 @@ Rationale for each rule: ``docs/04_candidate-filtering.md``.
 from __future__ import annotations
 
 import multiprocessing as mp
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
@@ -67,6 +67,9 @@ class SelectionRule:
         so a fixed per-cadence quota spent by RFI does not hide a signal that
         stands out locally. ``0`` keeps the quota alone.
     leak_ref: ``full_row_hits`` reference ON row for the leak magnitude gate.
+    exclude_mhz: sky-frequency bands outside the searched range (e.g. receiver
+        notch filters). Windows overlapping them never form candidates and are
+        left out of the cadence statistics, quota and OFF-noise probe.
     """
 
     far_quantile: float = 0.99
@@ -76,18 +79,44 @@ class SelectionRule:
     cfar_half: int = 0
     cfar_k: float = 0.0
     leak_ref: str = "weakest_on"
+    exclude_mhz: Tuple[Tuple[float, float], ...] = ()
 
+
+#: GBT receiver notch filters (L band 1200-1341.2 MHz, S band 2300-2360 MHz):
+#: hardware band-reject filters against strong radar and satellite-navigation
+#: transmissions; searches report completeness over the usable range outside them.
+NOTCH_MHZ: Tuple[Tuple[float, float], ...] = ((1200.0, 1341.2), (2300.0, 2360.0))
 
 #: Named selection rules. ``production`` is the rule of the 2026-10 runs
 #: (04b scan, devcal_v1 injections). ``hybrid_v1`` halves the quota and adds the
 #: local test, with ``cfar_k`` set on the development scan so the total number
 #: of windows forming candidates stays 1%, and references the leak gate to the
-#: ON scans holding the signal.
+#: ON scans holding the signal. ``hybrid_v2`` is ``hybrid_v1`` outside the
+#: receiver notches (same ``cfar_k``).
 RULES: Dict[str, SelectionRule] = {
     "production": SelectionRule(),
     "hybrid_v1": SelectionRule(far_quantile=0.995, cfar_half=256, cfar_k=CFAR_K_HYBRID_V1,
                                leak_ref="weakest_hit_on"),
 }
+RULES["hybrid_v2"] = replace(RULES["hybrid_v1"], exclude_mhz=NOTCH_MHZ)
+
+
+def usable_windows(f_starts: np.ndarray, fchans: int, freq_step_hz: float, fch1_mhz: float,
+                   exclude_mhz: Sequence[Tuple[float, float]]) -> np.ndarray:
+    """Windows whose sky-frequency span overlaps none of ``exclude_mhz``.
+
+    A window covers channels ``[f_start, f_start + fchans)``, i.e. sky
+    frequencies ``fch1 + channel * freq_step`` (signed step from the header).
+    """
+    usable = np.ones(len(f_starts), dtype=bool)
+    if not exclude_mhz:
+        return usable
+    fa = fch1_mhz + np.asarray(f_starts) * freq_step_hz / 1e6
+    fb = fch1_mhz + (np.asarray(f_starts) + fchans) * freq_step_hz / 1e6
+    lo, hi = np.minimum(fa, fb), np.maximum(fa, fb)
+    for a, b in exclude_mhz:
+        usable &= ~((hi > a) & (lo < b))
+    return usable
 
 
 def enable_determinism() -> Dict[str, object]:
@@ -342,18 +371,20 @@ def select_candidates(scores: np.ndarray, f_starts: np.ndarray, *, model, window
     are computed here when the rule has a local test.
     """
     stride, fchans = windows.stride, windows.fchans
-    median, mad_sigma = robust_stats(scores)
+    usable = usable_windows(f_starts, fchans, freq_step_hz, fch1_mhz, rule.exclude_mhz)
+    usable_scores = scores if usable.all() else scores[usable]
+    median, mad_sigma = robust_stats(usable_scores)
     # Gaussian 3s/5s are diagnostic references only: heavy-tailed disagreement
     # scores put them inside the OFF noise tail. thresh_5 still floors the
     # OFF-noise ceiling below.
     thresh_3 = median + 3 * mad_sigma
     thresh_5 = median + 5 * mad_sigma
-    n_3s = (scores > thresh_3).sum()
-    n_5s = (scores > thresh_5).sum()
+    n_3s = (usable_scores > thresh_3).sum()
+    n_5s = (usable_scores > thresh_5).sum()
 
     # Operating point: empirical quantile of this cadence's own score pool.
-    far_thresh = float(np.quantile(scores, rule.far_quantile))
-    above = scores > far_thresh
+    far_thresh = float(np.quantile(usable_scores, rule.far_quantile))
+    above = (scores > far_thresh) & usable
     n_far = int(above.sum())
     log(f"  {method}: median={median:.4f}  MAD_s={mad_sigma:.4f}  "
         f"3s(ref)={thresh_3:.4f}->{n_3s}  5s(ref)={thresh_5:.4f}->{n_5s}  "
@@ -362,7 +393,7 @@ def select_candidates(scores: np.ndarray, f_starts: np.ndarray, *, model, window
         if np.any(np.diff(f_starts) <= 0):
             raise ValueError("the local test needs scores in increasing f_start order")
         b, m = local if local is not None else local_stats(scores, rule.cfar_half)
-        above = above | ((scores - b) / m > rule.cfar_k)
+        above = above | (((scores - b) / m > rule.cfar_k) & usable)
         log(f"  {method}: local excess > {rule.cfar_k:.3f} sigma (+-{rule.cfar_half} windows) "
             f"-> {int(above.sum())} windows forming candidates")
 
@@ -375,7 +406,7 @@ def select_candidates(scores: np.ndarray, f_starts: np.ndarray, *, model, window
 
     thresholds = {"median": median, "mad_sigma": mad_sigma, "thresh_3": thresh_3,
                   "thresh_5": thresh_5, "far_thresh": far_thresh,
-                  "n_stage1": float(above.sum())}
+                  "n_stage1": float(above.sum()), "n_excluded": float((~usable).sum())}
     amaps: List[Optional[np.ndarray]] = [None] * len(clusters)
     if not hasattr(model, "anomaly_map") or len(clusters) == 0:
         return MethodResult(method, clusters, amaps, thresholds)
@@ -403,8 +434,9 @@ def select_candidates(scores: np.ndarray, f_starts: np.ndarray, *, model, window
     n_bg = 0
     if rule.off_ceiling_probe > 0:
         rng = np.random.default_rng(probe_seed)
-        n_bg = min(rule.off_ceiling_probe, len(f_starts))
-        bg_fstarts = rng.choice(f_starts, size=n_bg, replace=False)
+        probe_pool = f_starts if usable.all() else f_starts[usable]
+        n_bg = min(rule.off_ceiling_probe, len(probe_pool))
+        bg_fstarts = rng.choice(probe_pool, size=n_bg, replace=False)
         probe_cacheable = amap_cache is not None and not stale.intersection(bg_fstarts.tolist())
         if probe_cacheable and amap_cache.probe is not None:
             off_pool.extend(amap_cache.probe)

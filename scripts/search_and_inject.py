@@ -75,14 +75,16 @@ def parse_args():
 
 
 def _identity(args, rule, catalog):
-    return {
+    # JSON round trip, so it compares equal to the copy read back from provenance.json
+    # (tuples in the rule become lists there).
+    return json.loads(json.dumps({
         "checkpoint_sha256": sha256_file(args.checkpoint),
         "manifest_sha256": sha256_file(args.manifest),
         "catalog_sites_sha256": catalog.meta["sites_sha256"] if catalog else None,
         "selection_rule": asdict(rule),
         "top_k": args.top_k,
         "method": METHOD,
-    }
+    }))
 
 
 def main():

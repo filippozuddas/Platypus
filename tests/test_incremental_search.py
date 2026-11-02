@@ -77,6 +77,9 @@ RULE = SelectionRule(far_quantile=0.95, off_ceiling_probe=20)
 # Quota plus the local test: half-width scaled to the 79-window toy cadence.
 HYBRID = SelectionRule(far_quantile=0.95, off_ceiling_probe=20, cfar_half=4, cfar_k=3.0,
                        leak_ref="weakest_hit_on")
+# HYBRID with a band excluded around ON_ONLY_CHAN (fch1 8000 MHz, -2.79 Hz/channel).
+NOTCHED = SelectionRule(far_quantile=0.95, off_ceiling_probe=20, cfar_half=4, cfar_k=3.0,
+                        leak_ref="weakest_hit_on", exclude_mhz=((7999.96, 7999.98),))
 
 
 @pytest.mark.parametrize("rule", [RULE, HYBRID], ids=["quota", "hybrid"])
@@ -94,7 +97,7 @@ def test_unchanged_patch_reproduces_the_background(cadence, make_search, tmp_pat
                                   PERSISTENT_CHAN + 700,    # next to a persistent RFI cluster
                                   ON_ONLY_CHAN + 600,       # extends an existing cluster
                                   32, NCHANS - 32])         # band edges
-@pytest.mark.parametrize("rule", [RULE, HYBRID], ids=["quota", "hybrid"])
+@pytest.mark.parametrize("rule", [RULE, HYBRID, NOTCHED], ids=["quota", "hybrid", "notched"])
 def test_incremental_equals_full_search(cadence, make_search, tmp_path, chan, rule):
     search = make_search(rule)
     patch = _on_only_line(cadence, chan)
@@ -130,6 +133,16 @@ def test_local_test_admits_a_signal_the_filled_quota_hides(cadence, make_search)
     assert len(at(quota.clusters, 20_000)) == 0
     assert len(at(hybrid.clusters, 20_000)) == 1
     assert hybrid.thresholds["n_stage1"] > quota.thresholds["n_stage1"]
+
+
+def test_excluded_band_forms_no_candidates(cadence, make_search):
+    hybrid = make_search(HYBRID).background
+    notched = make_search(NOTCHED).background
+    def covers(clusters, chan):
+        return ((clusters.f_start_first <= chan) & (clusters.f_start_last + FCHANS > chan)).any()
+    assert covers(hybrid.clusters, ON_ONLY_CHAN) and not covers(notched.clusters, ON_ONLY_CHAN)
+    assert notched.thresholds["n_excluded"] > 0 and hybrid.thresholds["n_excluded"] == 0
+    assert covers(notched.clusters, PERSISTENT_CHAN)
 
 
 def test_probe_window_modified_forces_recompute(cadence, make_search, tmp_path):
