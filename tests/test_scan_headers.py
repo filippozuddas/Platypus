@@ -48,7 +48,7 @@ def test_contiguous_dataset_has_no_chunks_or_filters(tmp_path):
 
 def test_csv_keeps_layout_columns(tmp_path):
     path = tmp_path / "blc00_guppi_60055_00000_MESSIER67_0055.rawspec.0001.h5"
-    _write_filterbank(path, chunks=(4, 1, 16))
+    _write_filterbank(path, compression="gzip", chunks=(4, 1, 16))
     out = tmp_path / "headers.csv"
     scan_headers.write_csv(out, [scan_headers._process_one(str(path))])
     with out.open() as handle:
