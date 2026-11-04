@@ -23,7 +23,7 @@ from pathlib import Path
 from src.product_inventory import identify, node_scan_key
 
 SPLITS = ("train", "devcal", "final")
-SEQUENCE_GAP_S = 700  # file starts are ~325 s apart inside a cadence, >=855 s between
+SEQUENCE_GAP_S = 700  # longest start-to-start step inside a run of cadences is 474 s
 NIGHT_GAP_S = 12 * 3600  # 0000: <=4.69 h inside a night, >=28.21 h between nights
 BAND_TOL_MHZ = 0.01
 TSTART_TOL_S = 1.0
@@ -101,21 +101,28 @@ class Association:
 
 
 def group_sequences(product: str, rows: list[dict]) -> list[Sequence]:
-    """Split each node's time-ordered files wherever consecutive starts jump."""
+    """Cut each node's continuous run of files into consecutive 6-file sequences.
+
+    Back-to-back cadences on one node are 350-474 s apart, against 309-352 s
+    inside a cadence, so no gap separates them; runs are chunked by six as in
+    the 0000 census and the ABACAD check catches a misplaced cut. A remainder
+    becomes its own, flagged, sequence.
+    """
     by_node: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         by_node[row["node"]].append(row)
-    sequences = []
+    runs = []
     for node_rows in by_node.values():
         node_rows.sort(key=_start_s)
         current = [node_rows[0]]
         for row in node_rows[1:]:
             if _start_s(row) - _start_s(current[-1]) > SEQUENCE_GAP_S:
-                sequences.append(Sequence(product, current))
+                runs.append(current)
                 current = [row]
             else:
                 current.append(row)
-        sequences.append(Sequence(product, current))
+        runs.append(current)
+    sequences = [Sequence(product, run[i:i + 6]) for run in runs for i in range(0, len(run), 6)]
     sequences.sort(key=lambda s: (s.start_s, s.node))
     return sequences
 

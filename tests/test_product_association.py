@@ -48,6 +48,18 @@ def test_sequence_without_0000_counterpart_takes_the_split_of_its_night():
     assert s.scan_split == "devcal"
 
 
+def test_back_to_back_cadences_on_one_node_are_cut_by_six():
+    first = _seq("blc00", 1000)
+    second = _seq("blc00", 1000 + 5 * SCAN_STEP_S + 360, on="ON2", offs=("D", "E", "F"),
+                  scan0=16)
+    result = pa.associate({"0001": first + second},
+                          {"train": [_manifest_row(first), _manifest_row(second)]})
+    assert [(len(s.files), s.match, s.flags) for s in result.sequences["0001"]] == [
+        (6, "node_scan", []), (6, "node_scan", [])]
+    leftover = pa.associate({"0001": first + second[:2]}, {"train": [_manifest_row(first)]})
+    assert "files_2" in leftover.sequences["0001"][1].flags
+
+
 def test_night_without_0000_rows_is_left_unassigned():
     known = _seq("blc00", 1000)
     lone = _seq("blc00", 1000, day=DAY + 10)
