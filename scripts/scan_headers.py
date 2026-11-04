@@ -101,18 +101,33 @@ def _as_str(value) -> str:
     return str(value).strip()
 
 
+def read_layout(ds, path: Path) -> dict:
+    """Storage layout from metadata only; filter ids need no compression plugin."""
+    dcpl    = ds.id.get_create_plist()
+    filters = [dcpl.get_filter(i)[0] for i in range(dcpl.get_nfilters())]
+    return {
+        "dtype":           str(ds.dtype),
+        "chunks":          "x".join(map(str, ds.chunks)) if ds.chunks else "",
+        "filter_ids":      ",".join(map(str, filters)),
+        "storage_bytes":   int(ds.id.get_storage_size()),
+        "file_size_bytes": path.stat().st_size,
+    }
+
+
 def read_header_h5py(path: Path) -> dict:
     import h5py
     with h5py.File(str(path), "r") as f:
         # BL HDF5 files store header attrs on the "data" dataset
         if "data" in f:
-            h     = dict(f["data"].attrs)
-            shape = f["data"].shape
+            ds = f["data"]
+            h  = dict(ds.attrs)
         else:
             # fallback: root attrs + first dataset shape
-            h     = dict(f.attrs)
-            ds    = next(iter(f.values()))
-            shape = ds.shape
+            h  = dict(f.attrs)
+            ds = next(iter(f.values()))
+        shape  = ds.shape
+        layout = read_layout(ds, path)
+        layout["has_mask"] = "mask" in f
     ntime  = int(shape[0])
     nifs   = int(shape[1]) if len(shape) == 3 else 1
     nchans = int(shape[-1])
@@ -132,6 +147,7 @@ def read_header_h5py(path: Path) -> dict:
         "bw_MHz":      round(abs(foff * nchans), 4),
         "tsamp_s":     round(tsamp, 9),
         "duration_s":  round(tsamp * ntime, 2),
+        **layout,
     }
 
 
@@ -255,6 +271,35 @@ def infer_on_off(cluster: list) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# CSV output
+# ---------------------------------------------------------------------------
+
+CSV_COLS = [
+    "file", "product", "node", "mjd_day", "mjd_sec", "abs_time_s",
+    "scan_num", "target",
+    "f_start_MHz", "f_stop_MHz", "bw_MHz", "fch1_MHz", "foff_Hz",
+    "nchans", "ntime", "nifs", "tsamp_s", "duration_s",
+    "tstart_mjd", "source_name",
+    "dtype", "chunks", "filter_ids", "storage_bytes", "file_size_bytes", "has_mask",
+    "parse_error", "header_error",
+]
+
+
+def refuse_existing(out: Path) -> None:
+    if out.exists():
+        raise FileExistsError(f"Output already exists: {out}; choose a new name")
+
+
+def write_csv(out: Path, rows: list) -> None:
+    """Write the per-file table; never overwrite an earlier scan."""
+    refuse_existing(out)
+    with open(out, "x", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -278,6 +323,11 @@ def main():
     if not root.exists():
         print(f"ERROR: {root} does not exist", file=sys.stderr)
         sys.exit(1)
+    if args.out:
+        try:
+            refuse_existing(Path(args.out))
+        except FileExistsError as exc:
+            parser.error(str(exc))
 
     files = sorted(root.rglob("*.h5"))
     if args.product:
@@ -433,19 +483,8 @@ def main():
     # CSV output
     # -----------------------------------------------------------------------
     if args.out:
-        csv_cols = [
-            "file", "product", "node", "mjd_day", "mjd_sec", "abs_time_s",
-            "scan_num", "target",
-            "f_start_MHz", "f_stop_MHz", "bw_MHz", "fch1_MHz", "foff_Hz",
-            "nchans", "ntime", "nifs", "tsamp_s", "duration_s",
-            "tstart_mjd", "source_name", "parse_error", "header_error",
-        ]
-        out = Path(args.out)
-        with open(out, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=csv_cols, extrasaction="ignore")
-            writer.writeheader()
-            writer.writerows(good + bad)
-        print(f"\n  CSV saved → {out}  ({len(good)} rows, {len(bad)} with errors)")
+        write_csv(Path(args.out), good + bad)
+        print(f"\n  CSV saved → {args.out}  ({len(good)} rows, {len(bad)} with errors)")
 
 
 if __name__ == "__main__":
