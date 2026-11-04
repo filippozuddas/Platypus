@@ -156,7 +156,6 @@ After `pip install -e .`, the following commands are available system-wide:
 | `bl-inference` | Run inference on real cadences |
 | `bl-inject` | Injection-recovery sensitivity test |
 | `bl-preprocess` | Build preprocessed snippet cache |
-| `bl-manifest` | Build cadence manifest from raw data (`scripts/build_cadence_manifest.py`; see also `scripts/build_gbt_cadence_manifest.py` for stratified per-target GBT splits, no console entry point yet) |
 
 Each accepts the same arguments as the corresponding `python scripts/...` invocation. For example:
 
@@ -221,10 +220,9 @@ Platypus/
 │   ├── inject_recover.py
 │   ├── search.py
 │   ├── preprocess_cache.py
-│   ├── build_cadence_manifest.py
-│   ├── build_gbt_cadence_manifest.py   # stratified per-target GBT cadence splitting
 │   ├── fit_udma_teacher_norm.py        # offline teacher feature mu/sigma for UDMA
 │   ├── scan_headers.py                 # .h5 header census
+│   ├── associate_products.py           # 0001/0002 night-split manifests from header CSVs
 │   └── debug/                          # diagnostics, not part of the pipeline (see scripts/debug/README.md)
 ├── docs/                     # design rationale and results (see docs/README.md)
 │   ├── 01_scoring-history.md     # why reconstruction error fails — start here

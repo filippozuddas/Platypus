@@ -51,7 +51,7 @@ loader:
 
 dataset:
   # Real Exotica GBT batch (905 complete cadences, stratified train/val/held-out
-  # split from scripts/build_gbt_cadence_manifest.py, 2026-07-06) — replaces the
+  # split from scripts/build_gbt_cadence_manifest.py, 2026-07-06, removed after 6cb228a) — replaces the
   # SRT-derived cadence_list/cache_dir below. cadence_list is read unconditionally
   # by scripts/train.py before it checks cache_dir, so it must stay valid even
   # though build_datasets() ignores it once cache_dir exists on disk.

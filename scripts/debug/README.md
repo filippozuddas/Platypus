@@ -63,8 +63,6 @@ Findings: [`docs/01_scoring-history.md`](../../docs/01_scoring-history.md)
 - `exotica_dist_analysis.py` — distributional analysis of the real `.0000.h5` batch
   (normalization sanity, RFI occupancy, band/cadence completeness, ON vs OFF).
   Runs on the data host; feeds `notebooks/05_exotica_0000_distributions.ipynb`.
-- `exotica_cadence_summary.py` — header-only cadence census; runs anywhere
-  `data/processed/exotica_0000_headers.csv` exists, no data host needed
 - `normalization_diagnostic.py` — preprocessing sanity checks
 
 ## Candidate plotting
