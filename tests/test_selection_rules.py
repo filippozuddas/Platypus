@@ -61,6 +61,8 @@ def test_named_rules():
     assert h.leak_ref == "weakest_hit_on"
     assert RULES["hybrid_v2"].exclude_mhz == NOTCH_MHZ
     assert RULES["hybrid_v2"].cfar_k == h.cfar_k and h.exclude_mhz == ()
+    v3 = RULES["hybrid_v3"]
+    assert v3.leak_frac == 0.5 and v3.exclude_mhz == NOTCH_MHZ and v3.cfar_k == h.cfar_k
 
 
 def test_usable_windows_follow_the_signed_frequency_axis():

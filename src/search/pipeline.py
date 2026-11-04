@@ -92,13 +92,16 @@ NOTCH_MHZ: Tuple[Tuple[float, float], ...] = ((1200.0, 1341.2), (2300.0, 2360.0)
 #: local test, with ``cfar_k`` set on the development scan so the total number
 #: of windows forming candidates stays 1%, and references the leak gate to the
 #: ON scans holding the signal. ``hybrid_v2`` is ``hybrid_v1`` outside the
-#: receiver notches (same ``cfar_k``).
+#: receiver notches (same ``cfar_k``). ``hybrid_v3`` relaxes the leak gate to
+#: half the weakest ON peak, chosen on the development injections from the
+#: saved anomaly-map row peaks (more signals kept for ~5% more background).
 RULES: Dict[str, SelectionRule] = {
     "production": SelectionRule(),
     "hybrid_v1": SelectionRule(far_quantile=0.995, cfar_half=256, cfar_k=CFAR_K_HYBRID_V1,
                                leak_ref="weakest_hit_on"),
 }
 RULES["hybrid_v2"] = replace(RULES["hybrid_v1"], exclude_mhz=NOTCH_MHZ)
+RULES["hybrid_v3"] = replace(RULES["hybrid_v2"], leak_frac=0.5)
 
 
 def usable_windows(f_starts: np.ndarray, fchans: int, freq_step_hz: float, fch1_mhz: float,
