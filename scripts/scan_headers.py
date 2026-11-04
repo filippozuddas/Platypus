@@ -102,14 +102,17 @@ def _as_str(value) -> str:
 
 
 def read_layout(ds, path: Path) -> dict:
-    """Storage layout from metadata only; filter ids need no compression plugin."""
+    """Storage layout from metadata only; filter ids need no compression plugin.
+
+    No get_storage_size(): it walks the whole chunk index, ~1000 random reads
+    per 0001 file on the USB disks.
+    """
     dcpl    = ds.id.get_create_plist()
     filters = [dcpl.get_filter(i)[0] for i in range(dcpl.get_nfilters())]
     return {
         "dtype":           str(ds.dtype),
         "chunks":          "x".join(map(str, ds.chunks)) if ds.chunks else "",
         "filter_ids":      ",".join(map(str, filters)),
-        "storage_bytes":   int(ds.id.get_storage_size()),
         "file_size_bytes": path.stat().st_size,
     }
 
@@ -280,7 +283,7 @@ CSV_COLS = [
     "f_start_MHz", "f_stop_MHz", "bw_MHz", "fch1_MHz", "foff_Hz",
     "nchans", "ntime", "nifs", "tsamp_s", "duration_s",
     "tstart_mjd", "source_name",
-    "dtype", "chunks", "filter_ids", "storage_bytes", "file_size_bytes", "has_mask",
+    "dtype", "chunks", "filter_ids", "file_size_bytes", "has_mask",
     "parse_error", "header_error",
 ]
 

@@ -32,7 +32,6 @@ def test_layout_fields_come_from_metadata(tmp_path):
     assert row["filter_ids"] == "1"  # H5Z_FILTER_DEFLATE
     assert row["has_mask"] is True
     assert row["file_size_bytes"] == path.stat().st_size
-    assert 0 < row["storage_bytes"] <= 8 * 16 * 4
     assert row["nchans"] == 16 and row["ntime"] == 8
 
 
@@ -43,7 +42,6 @@ def test_contiguous_dataset_has_no_chunks_or_filters(tmp_path):
     assert row["chunks"] == ""
     assert row["filter_ids"] == ""
     assert row["has_mask"] is False
-    assert row["storage_bytes"] == 8 * 16 * 4
 
 
 def test_csv_keeps_layout_columns(tmp_path):
@@ -53,7 +51,7 @@ def test_csv_keeps_layout_columns(tmp_path):
     scan_headers.write_csv(out, [scan_headers._process_one(str(path))])
     with out.open() as handle:
         (row,) = list(csv.DictReader(handle))
-    for column in ("dtype", "chunks", "filter_ids", "storage_bytes",
+    for column in ("dtype", "chunks", "filter_ids",
                    "file_size_bytes", "has_mask"):
         assert row[column] != "", column
 
