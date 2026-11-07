@@ -15,7 +15,7 @@ import pandas as pd
 from scipy.ndimage import median_filter
 
 __all__ = ["cluster_candidates", "on_off_contrast", "full_row_hits", "off_noise_ceiling",
-           "local_stats", "update_local_stats"]
+           "local_stats", "update_local_stats", "short_list_order"]
 
 MAD_SCALE = 1.4826
 
@@ -265,6 +265,7 @@ def full_row_hits(
     off_rows=(1, 3, 5),
     leak_frac: float = 0.3,
     leak_ref: str = "weakest_on",
+    single_off_frac: Optional[float] = None,
 ) -> dict:
     """Row-level ON/OFF hit counts with no column restriction, for short-list
     volume reduction.
@@ -277,7 +278,8 @@ def full_row_hits(
 
     Short-list rule: ``n_on_hits_full >= 2`` AND not ``off_leak``, where
     ``off_leak`` requires >=2 OFF rows to clear ``threshold`` *and* reach at
-    least ``leak_frac`` of the weakest ON row's peak.
+    least ``leak_frac`` of the weakest ON row's peak, or (``single_off_frac``
+    set) one OFF row to clear ``threshold`` and reach ``single_off_frac`` of it.
 
     See ``docs/04_candidate-filtering.md`` §5 for the blind-spot trade,
     the magnitude gate's motivation, and the rejected column-coherence gate.
@@ -298,10 +300,16 @@ def full_row_hits(
             above ``threshold`` reject it. ``weakest_hit_on``: the weakest ON
             row above ``threshold`` (all ON rows if none is), so the gate
             compares OFF leakage with the scans that actually hold the signal.
+        single_off_frac: if set, one OFF row above ``threshold`` reaching this
+            fraction of the reference ON peak is enough for ``off_leak``
+            (interference as bright in an OFF scan as in the dimmest ON scan
+            holding the signal). Meant with ``leak_ref="weakest_hit_on"``: with
+            ``weakest_on`` the reference of a two-ON signal is the empty ON scan
+            and the gate becomes "any OFF row above threshold".
 
     Returns:
-        dict with ``n_on_hits_full``, ``n_off_hits_full``, ``off_leak``,
-        ``in_short_list``.
+        dict with ``n_on_hits_full``, ``n_off_hits_full`` (OFF rows passing the
+        two-row gate), ``off_single_leak``, ``off_leak``, ``in_short_list``.
     """
     nh, _ = anomaly_map.shape
     on_idx = [r for r in on_rows if r < nh]
@@ -318,12 +326,15 @@ def full_row_hits(
     on_ref = float(ref_rows.min()) if ref_rows.size else 0.0
     leak_mask = (off_row_max > threshold) & (off_row_max >= leak_frac * on_ref)
     n_off_hits_full = int(leak_mask.sum())
-    off_leak = n_off_hits_full >= 2
+    off_single_leak = single_off_frac is not None and bool(
+        ((off_row_max > threshold) & (off_row_max >= single_off_frac * on_ref)).any())
+    off_leak = n_off_hits_full >= 2 or off_single_leak
     in_short_list = (n_on_hits_full >= 2) and not off_leak
 
     return {
         "n_on_hits_full": n_on_hits_full,
         "n_off_hits_full": n_off_hits_full,
+        "off_single_leak": off_single_leak,
         "off_leak": off_leak,
         "in_short_list": in_short_list,
         # The six row peaks the two gates above are derived from. Returned so a
@@ -335,3 +346,11 @@ def full_row_hits(
         "on_row_max": on_row_max.tolist(),
         "off_row_max": off_row_max.tolist(),
     }
+
+
+def short_list_order(in_short_list: np.ndarray, on_off_contrast: np.ndarray) -> np.ndarray:
+    """Indices of the short-listed candidates in the order a human reviews them
+    (``on_off_contrast`` descending): page ``k`` of an exported PDF is candidate
+    ``order[k]``. Shared by the export and by stages that edit an exported PDF."""
+    short_idx = np.nonzero(np.asarray(in_short_list, dtype=bool))[0]
+    return short_idx[np.argsort(-np.asarray(on_off_contrast, dtype=float)[short_idx])]

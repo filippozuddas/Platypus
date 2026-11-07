@@ -1,14 +1,21 @@
 """Selection-rule building blocks: local (CFAR) statistics and their incremental
-update, mask-driven clustering, the leak reference row, the cross-target veto."""
+update, mask-driven clustering, the leak reference row, the one-OFF gate, the
+review order, rules recorded in provenance, the cross-target veto."""
+
+import json
+from dataclasses import asdict, replace
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from src.search.candidates import (
-    cluster_candidates, full_row_hits, local_stats, update_local_stats,
+    cluster_candidates, full_row_hits, local_stats, short_list_order, update_local_stats,
 )
-from src.search.pipeline import NOTCH_MHZ, RULES, SelectionRule, usable_windows
+from src.search.pipeline import (
+    NOTCH_MHZ, RULES, SelectionRule, rule_from_record, shares_clusters, short_list_verdict,
+    usable_windows,
+)
 from src.search.veto import count_other_targets, same_session_rows
 
 
@@ -63,6 +70,63 @@ def test_named_rules():
     assert RULES["hybrid_v2"].cfar_k == h.cfar_k and h.exclude_mhz == ()
     v3 = RULES["hybrid_v3"]
     assert v3.leak_frac == 0.5 and v3.exclude_mhz == NOTCH_MHZ and v3.cfar_k == h.cfar_k
+    v4 = RULES["hybrid_v4"]
+    assert v4 == replace(v3, single_off_frac=1.0, veto_min_targets=2)
+    assert shares_clusters(v3, v4) and not shares_clusters(RULES["hybrid_v2"], RULES["production"])
+
+
+def test_one_off_gate_at_the_weakest_lit_on_peak():
+    amap = np.full((6, 64), 0.1)
+    amap[0, 10], amap[2, 12] = 8.0, 5.0      # signal in ON 1 and ON 2; ON 3 empty
+    amap[3, 40] = 5.0                         # one OFF as bright as the weakest lit ON
+    kw = dict(threshold=0.5, leak_frac=0.5, leak_ref="weakest_hit_on")
+    off = full_row_hits(amap, **kw)
+    assert not off["off_leak"] and not off["off_single_leak"] and off["in_short_list"]
+    on = full_row_hits(amap, **kw, single_off_frac=1.0)
+    assert on["off_single_leak"] and on["off_leak"] and not on["in_short_list"]
+    assert on["n_off_hits_full"] == off["n_off_hits_full"] == 1   # two-OFF gate unchanged
+    amap[3, 40] = 4.9
+    assert full_row_hits(amap, **kw, single_off_frac=1.0)["in_short_list"]
+    # The gate needs the OFF row above threshold even when the reference is low.
+    amap[3, 40] = 0.4
+    weak = full_row_hits(amap, threshold=0.5, leak_frac=0.5, single_off_frac=0.01)
+    assert not weak["off_single_leak"]
+
+
+def test_short_list_verdict_follows_the_rule():
+    amaps = np.full((3, 6, 64), 0.1)
+    amaps[:, 0, 5] = amaps[:, 2, 5] = amaps[:, 4, 5] = 4.0   # three lit ON rows
+    amaps[1, 1, 9] = 4.0                                      # one bright OFF
+    amaps[2, 1, 9] = amaps[2, 3, 9] = 4.0                     # two bright OFF
+    np.testing.assert_array_equal(short_list_verdict(amaps, 1.0, RULES["hybrid_v3"]),
+                                  [True, True, False])
+    np.testing.assert_array_equal(short_list_verdict(amaps, 1.0, RULES["hybrid_v4"]),
+                                  [True, False, False])
+
+
+def test_review_order_survives_a_csv_round_trip(tmp_path):
+    rng = np.random.default_rng(4)
+    c = pd.DataFrame({"in_short_list": rng.random(200) < 0.4,
+                      "on_off_contrast": rng.lognormal(0.3, 1.0, 200)})
+    order = short_list_order(c.in_short_list.to_numpy(), c.on_off_contrast.to_numpy())
+    assert c.in_short_list.to_numpy()[order].all() and len(order) == c.in_short_list.sum()
+    assert np.all(np.diff(c.on_off_contrast.to_numpy()[order]) <= 0)
+    c.to_csv(tmp_path / "c.csv", index=False)
+    back = pd.read_csv(tmp_path / "c.csv")
+    np.testing.assert_array_equal(
+        short_list_order(back.in_short_list.to_numpy(), back.on_off_contrast.to_numpy()), order)
+
+
+def test_rule_recorded_in_provenance():
+    for name in ("production", "hybrid_v3", "hybrid_v4"):
+        record = json.loads(json.dumps(asdict(RULES[name])))
+        assert rule_from_record(record) == RULES[name]
+    # A run recorded before the one-OFF gate and the veto existed.
+    old = {k: v for k, v in json.loads(json.dumps(asdict(RULES["hybrid_v3"]))).items()
+           if k not in ("single_off_frac", "veto_min_targets")}
+    assert rule_from_record(old) == RULES["hybrid_v3"]
+    with pytest.raises(ValueError):
+        rule_from_record({**old, "nope": 1})
 
 
 def test_usable_windows_follow_the_signed_frequency_axis():

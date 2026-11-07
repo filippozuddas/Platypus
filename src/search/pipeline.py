@@ -23,9 +23,9 @@ Rationale for each rule: ``docs/04_candidate-filtering.md``.
 from __future__ import annotations
 
 import multiprocessing as mp
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import h5py
 import numpy as np
@@ -36,7 +36,7 @@ from src.data.preprocessing import bandpass_correct, core_transform
 from src.models.autoencoder import build_autoencoder
 from src.search.candidates import (
     cluster_candidates, full_row_hits, local_stats, off_noise_ceiling, on_off_contrast,
-    update_local_stats,
+    short_list_order, update_local_stats,
 )
 
 MAD_SCALE = 1.4826
@@ -70,6 +70,14 @@ class SelectionRule:
     exclude_mhz: sky-frequency bands outside the searched range (e.g. receiver
         notch filters). Windows overlapping them never form candidates and are
         left out of the cadence statistics, quota and OFF-noise probe.
+    single_off_frac: ``full_row_hits`` one-OFF leak gate (``None`` = off): a
+        single OFF row reaching this fraction of the reference ON peak rejects.
+    veto_min_targets: cross-target veto (``src/search/veto.py``): a short-listed
+        candidate meeting clusters of at least this many other targets of the
+        same night and compute node is dropped from the reviewed list (0 = off).
+        It needs the other cadences of the night, so the per-cadence search
+        ignores it; ``scripts/cross_target_veto.py`` applies it once the night is
+        scanned. The share it removes depends on how many targets a night has.
     """
 
     far_quantile: float = 0.99
@@ -80,6 +88,8 @@ class SelectionRule:
     cfar_k: float = 0.0
     leak_ref: str = "weakest_on"
     exclude_mhz: Tuple[Tuple[float, float], ...] = ()
+    single_off_frac: Optional[float] = None
+    veto_min_targets: int = 0
 
 
 #: GBT receiver notch filters (L band 1200-1341.2 MHz, S band 2300-2360 MHz):
@@ -95,6 +105,10 @@ NOTCH_MHZ: Tuple[Tuple[float, float], ...] = ((1200.0, 1341.2), (2300.0, 2360.0)
 #: receiver notches (same ``cfar_k``). ``hybrid_v3`` relaxes the leak gate to
 #: half the weakest ON peak, chosen on the development injections from the
 #: saved anomaly-map row peaks (more signals kept for ~5% more background).
+#: ``hybrid_v4`` adds the one-OFF gate at the weakest lit ON peak and the
+#: cross-target veto at two other targets; measured on the development
+#: injections from the saved row peaks, it keeps ~99% of the hybrid_v3
+#: short-listed signals and about half of the background short list.
 RULES: Dict[str, SelectionRule] = {
     "production": SelectionRule(),
     "hybrid_v1": SelectionRule(far_quantile=0.995, cfar_half=256, cfar_k=CFAR_K_HYBRID_V1,
@@ -102,6 +116,45 @@ RULES: Dict[str, SelectionRule] = {
 }
 RULES["hybrid_v2"] = replace(RULES["hybrid_v1"], exclude_mhz=NOTCH_MHZ)
 RULES["hybrid_v3"] = replace(RULES["hybrid_v2"], leak_frac=0.5)
+RULES["hybrid_v4"] = replace(RULES["hybrid_v3"], single_off_frac=1.0, veto_min_targets=2)
+
+#: Rule fields that act only on the short-list verdict of an existing cluster:
+#: two rules equal outside them share windows, thresholds, clusters, anomaly
+#: maps and ``off_ceiling``, so one's verdict can be re-decided from the other's
+#: saved maps.
+VERDICT_FIELDS = ("leak_frac", "leak_ref", "single_off_frac", "veto_min_targets")
+
+
+def rule_from_record(record: Mapping[str, Any]) -> SelectionRule:
+    """The rule recorded in a run's provenance (``asdict``, JSON round trip).
+
+    Fields added to :class:`SelectionRule` after the run take their defaults,
+    which reproduce the behaviour of that time.
+    """
+    known = {f.name for f in fields(SelectionRule)}
+    unknown = set(record) - known
+    if unknown:
+        raise ValueError(f"unknown selection-rule fields {sorted(unknown)}")
+    kw = dict(record)
+    if "exclude_mhz" in kw:
+        kw["exclude_mhz"] = tuple(tuple(band) for band in kw["exclude_mhz"])
+    return SelectionRule(**kw)
+
+
+def shares_clusters(a: SelectionRule, b: SelectionRule) -> bool:
+    """True if ``a`` and ``b`` differ at most in :data:`VERDICT_FIELDS`."""
+    da, db = asdict(a), asdict(b)
+    return all(da[k] == db[k] for k in da if k not in VERDICT_FIELDS)
+
+
+def short_list_verdict(amaps: Sequence[np.ndarray], off_ceiling: float,
+                       rule: SelectionRule) -> np.ndarray:
+    """``in_short_list`` of each cluster under ``rule``, from its saved anomaly map
+    and the cadence's ``off_ceiling`` (the same call as :func:`select_candidates`)."""
+    return np.array([full_row_hits(a, threshold=off_ceiling, leak_frac=rule.leak_frac,
+                                   leak_ref=rule.leak_ref,
+                                   single_off_frac=rule.single_off_frac)["in_short_list"]
+                     for a in amaps], dtype=bool)
 
 
 def usable_windows(f_starts: np.ndarray, fchans: int, freq_step_hz: float, fch1_mhz: float,
@@ -473,14 +526,15 @@ def select_candidates(scores: np.ndarray, f_starts: np.ndarray, *, model, window
 
     columns: Dict[str, list] = {k: [] for k in (
         "on_off_contrast", "on_mean", "off_mean", "n_on_hits", "n_off_hits",
-        "n_on_hits_full", "n_off_hits_full", "off_leak", "in_short_list")}
+        "n_on_hits_full", "n_off_hits_full", "off_single_leak", "off_leak", "in_short_list")}
     for amap_c in amaps:
         stats = on_off_contrast(amap_c, threshold=off_ceiling)
         for k in ("on_off_contrast", "on_mean", "off_mean", "n_on_hits", "n_off_hits"):
             columns[k].append(stats[k])
         fr = full_row_hits(amap_c, threshold=off_ceiling, leak_frac=rule.leak_frac,
-                           leak_ref=rule.leak_ref)
-        for k in ("n_on_hits_full", "n_off_hits_full", "off_leak", "in_short_list"):
+                           leak_ref=rule.leak_ref, single_off_frac=rule.single_off_frac)
+        for k in ("n_on_hits_full", "n_off_hits_full", "off_single_leak", "off_leak",
+                  "in_short_list"):
             columns[k].append(fr[k])
     for k, v in columns.items():
         clusters[k] = v
@@ -628,8 +682,8 @@ def rank_for_export(result: MethodResult, ignore_short_list: bool = False,
     clusters, amaps, method = result.clusters, result.amaps, result.method
     has_amap = len(amaps) > 0 and amaps[0] is not None
     if has_amap and not ignore_short_list:
-        short_idx = np.nonzero(clusters["in_short_list"].to_numpy())[0]
-        order = short_idx[np.argsort(-clusters["on_off_contrast"].to_numpy()[short_idx])]
+        order = short_list_order(clusters["in_short_list"].to_numpy(),
+                                 clusters["on_off_contrast"].to_numpy())
         log(f"  {method}: {len(order)}/{len(clusters)} candidates "
             f"in short list after ON/OFF full-row filter")
     elif has_amap:

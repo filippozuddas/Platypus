@@ -133,7 +133,33 @@ candidate. Persistent RFI and fast chirps — the cases this filter exists to
 catch — still trip `off_leak`, because their OFF-row magnitude is comparable to
 their own ON-row magnitude, not merely above the noise floor.
 
-### 5.1 Rejected: column-coherence gate
+### 5.1 One-OFF gate and cross-target veto (`hybrid_v4`)
+
+Added 2026-11 after a census of the background short list of the development
+scan. Two failure modes dominated, besides maps of pure noise: interference as
+bright in one OFF scan as in the ON scans (the two-OFF requirement above never
+fires on a single bright OFF), and interference present toward other targets
+observed the same night on the same compute node.
+
+- **One-OFF gate** (`single_off_frac=1.0`, with `leak_ref="weakest_hit_on"`): a
+  single OFF row above `threshold` reaching the peak of the weakest ON row that
+  holds the signal sets `off_leak`. The model's own response in the OFF rows to
+  a genuine ON-only signal stays below that peak (it reaches ~0.8× of it), so
+  the gate costs almost no injected signals at 1.0× and becomes costly quickly
+  below it: lower it only after re-measuring.
+- **Cross-target veto** (`veto_min_targets=2`, `src/search/veto.py`): a
+  candidate overlapping clusters of at least two other targets of the same
+  night and node is dropped from the reviewed list (direction-of-origin rule).
+  It needs the whole night, so `scripts/cross_target_veto.py` applies it after
+  the scan and cuts the reviewed PDF from the scan's one. The share it removes
+  depends on how many targets a night has on each node.
+
+Rejected at the same time: a margin on the weakest lit ON row (e.g. 1.3×
+`threshold`). It removes most noise maps, but a weak genuine signal produces the
+same barely-above-threshold rows, and the margin halved the recovery of
+injected signals at moderate SNR.
+
+### 5.2 Rejected: column-coherence gate
 
 Proposed 2026-07-16: require each row's hit to land near the strongest ON row's
 peak column. **Rejected on the arithmetic.**

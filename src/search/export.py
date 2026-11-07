@@ -58,3 +58,22 @@ def export_candidates(ranked: pd.DataFrame, amaps: List[Optional[np.ndarray]], *
     if pdf is not None:
         pdf.close()
     return len(top)
+
+
+def subset_pdf(src: Path, dst: Path, pages: List[int], expected_pages: int) -> None:
+    """Write the ``pages`` (0-based, in this order) of ``src`` to ``dst``.
+
+    ``expected_pages`` guards against editing a PDF that does not hold the
+    candidates the page indices refer to (e.g. one exported with ``top_k``).
+    Needs ``pypdf``.
+    """
+    from pypdf import PdfReader, PdfWriter
+
+    reader = PdfReader(str(src))
+    if len(reader.pages) != expected_pages:
+        raise ValueError(f"{src}: {len(reader.pages)} pages, expected {expected_pages}")
+    writer = PdfWriter()
+    for k in pages:
+        writer.add_page(reader.pages[k])
+    with open(dst, "wb") as f:
+        writer.write(f)

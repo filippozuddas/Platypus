@@ -22,7 +22,8 @@ CSV_COLUMNS = [
     "f_start_peak", "freq_mhz_peak", "peak_score", "mean_score", "n_snippets",
     "f_start_first", "f_start_last", "cluster_width_channels", "on_off_contrast",
     "on_mean", "off_mean", "n_on_hits", "n_off_hits", "n_on_hits_full",
-    "n_off_hits_full", "off_leak", "in_short_list", "off_ceiling", "thresh_3", "thresh_5",
+    "n_off_hits_full", "off_single_leak", "off_leak", "in_short_list", "off_ceiling",
+    "thresh_3", "thresh_5",
 ]
 
 
