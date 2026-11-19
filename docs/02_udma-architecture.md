@@ -32,21 +32,36 @@ objective in training.
 ## 2. Teacher
 
 **Decision: the teacher is our own frozen ViT-MAE encoder, self-supervised on
-GBT data, read at transformer block 3. No P→T distillation stage.**
+radio spectrograms, read at transformer block 3. No P→T distillation stage.**
+
+Two checkpoints exist. The one used by the current search
+(`configs/model/udma_nightsplit.yaml`, `057f87c`) was trained on **SRT**
+cadences, not on GBT data: in the radio domain, but on another telescope and
+with no contact with the search data. A GBT-trained checkpoint (`4b5660c`,
+`configs/model/udma.yaml`) was trained later on the GBT data split before the
+night-disjoint split; it differs from `057f87c` in data, preprocessing and
+training length, so the two are not a clean comparison.
 
 `ViTMAE.encode_tokens(x)` gives `(B, 384, 128)`, reshaped to `(B, 128, 6, 64)` —
 a patch grid of 6 time rows × 64 frequency columns over a `(96, 1024)` input.
 The checkpoint is pinned for comparability across every diagnostic.
 
-**Rationale.** Domain-matched and label-free, preserving the unsupervised
-history. The paper's P→T distillation exists to compress a generic network,
-align dimensions, and impose a small receptive field; the first two do not apply
-(our features are already compact and in-domain), and the third serves
-*localization*, which is not the primary frame-level readout.
+**Rationale.** In-domain and label-free, preserving the unsupervised history.
+The paper's P→T distillation exists to compress a generic network, align
+dimensions, and impose a small receptive field; the first two do not apply (our
+features are already compact and radio-trained), and the third serves
+*localization*, which was judged secondary to the frame-level readout.
+
+That last judgement did not hold. The search chain filters candidates with
+ON/OFF rules that need a map lit only in the ON rows, and a receptive field
+confined to one observation is precisely what the later distilled teacher
+lacked. See [`03_teacher-localization.md`](03_teacher-localization.md) §4.2.
 
 **Rejected alternatives.** A supervised AST teacher (ties the search to known
 signal classes — excluded on principle, not performance) and an
-ImageNet-pretrained CNN (domain-foreign, external dependency).
+ImageNet-pretrained CNN (domain-foreign, external dependency). The second was
+later tried after all, as the paper-faithful route of §11; its record is in
+[`03_teacher-localization.md`](03_teacher-localization.md).
 
 **Pre-empted objection.** "Mahalanobis on these same tokens already failed."
 True, but that was *density* scoring (is this token far from the normal cloud?).
@@ -206,8 +221,10 @@ All five bars passed; see [`05_results.md`](05_results.md).
 | Training λ3 collapses students onto each other → `map_ss` dead | `map_ss` AUC ≪ pixel probe | λ3 ∈ {1, 0.1, 0} |
 | Global-attention smearing → maps diffuse, localization lost | topk ≈ mean | accepted for frame-level scoring |
 
-The smearing risk did **not** materialize with this teacher — but it is exactly
-what a distilled out-of-domain teacher later produced. That investigation is
+The smearing risk did **not** materialize with this teacher — but diffuse maps
+are exactly what a distilled out-of-domain teacher later produced, through a
+distillation target whose receptive field spans all six observations rather
+than through attention. That investigation is
 [`03_teacher-localization.md`](03_teacher-localization.md).
 
 ---
@@ -230,7 +247,8 @@ collapse:
 - **(A) Teacher.** The paper uses a 3-layer CNN (RF 7×7) *distilled from a
   frozen generic pretrained network*, anchoring the feature space out of domain
   **by construction**; spectrum data enters only as distillation input, never as
-  a learning target. We use a domain-trained ViT-MAE — the exact opposite.
+  a learning target. We use a ViT-MAE trained on radio spectrograms (SRT for the
+  reference checkpoint) — the exact opposite.
 - **(B) Memory.** The paper uses the Park 2020 variant: cosine similarity, an
   update mechanism, compactness+separateness losses, `concat(z, z̃)`, and
   **M = 10–50 items with 1 query per sample**. We use Gong 2019: dot-product,
@@ -253,5 +271,10 @@ described in [`04_candidate-filtering.md`](04_candidate-filtering.md).
 empirically rather than assumed. Restoring the paper's memory size (`mem_slots`
 500 → 30) produced a strong mechanistic signal that never converted into a
 detection gain, and was dropped. Restoring the paper's out-of-domain distilled
-teacher produced the best detector built so far but destroyed localization. Both
-outcomes are in [`03_teacher-localization.md`](03_teacher-localization.md).
+teacher produced the best detector built so far but destroyed localization.
+That attempt departed from the paper on the property that matters here: its
+distillation target was ResNet-18 `layer3` on the whole frame, not a small
+receptive field. A ResNet-18 applied to one observation at a time passes the
+teacher gates; whether a teacher distilled from it localizes and detects in the
+full search chain is not yet measured. Both outcomes are in
+[`03_teacher-localization.md`](03_teacher-localization.md).
