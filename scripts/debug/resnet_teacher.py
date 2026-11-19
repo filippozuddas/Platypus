@@ -9,13 +9,33 @@ Exposes the minimal interface ``scripts/debug/teacher_sensitivity_test.py``'s
 this backbone. P has no transformer blocks of its own — the entire conv stack through
 ``layer3`` is the ``patch_embed``, and ``encoder.layers`` is empty (nothing further to
 iterate).
+
+``confine`` selects what each grid cell is allowed to see:
+
+    none  the whole frame (the July 2026 distillation target). layer3's
+          vertical receptive field spans every observation, and row ``n`` is
+          centred on the first pixel row of observation ``n``.
+    obs   P is applied to each observation on its own (16 x 1024 strips): the
+          cell sees its own observation only, full context along frequency.
+    tile  P is applied to a 16 x ``tile_width`` crop centred on the cell and
+          pooled to one vector — a patch descriptor in the sense of Bergmann
+          et al. 2020; confined along frequency as well.
+
+With ``obs`` and ``tile`` an ON-only signal cannot move an OFF row by
+construction.
 """
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torchvision.models import ResNet18_Weights, resnet18
 
-__all__ = ["ResNetTeacher"]
+from src.models.observation_fold import fold_observations, unfold_rows
+
+__all__ = ["ResNetTeacher", "CONFINE_MODES"]
+
+CONFINE_MODES = ("none", "obs", "tile")
+_STRIDE = 16  # layer3 downsampling, and the grid cell size in pixels
 
 
 class _EmptyEncoder(nn.Module):
@@ -36,14 +56,35 @@ class ResNetTeacher(nn.Module):
     renormalization. That is a deliberate simplification the gate itself is
     meant to validate (docs/02_udma-architecture.md §11),
     not an oversight.
+
+    Args:
+        confine: ``none`` | ``obs`` | ``tile`` (module docstring).
+        n_obs: observations stacked along time (rows of the output grid when
+            confined).
+        tile_width: crop width in channels for ``tile``; the 16-px cell plus
+            equal context on both sides. Frame edges are zero-padded, which is
+            the median level after standardization.
+        tile_chunk: crops per forward for ``tile`` (memory bound only).
+        pretrained: ``False`` builds random weights — for geometry tests, which
+            do not depend on the weights and must not download anything.
     """
 
     grid_size = (6, 64)
     channels = 256
 
-    def __init__(self):
+    def __init__(self, confine: str = "none", n_obs: int = 6, tile_width: int = 64,
+                 tile_chunk: int = 4096, pretrained: bool = True):
         super().__init__()
-        backbone = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+        if confine not in CONFINE_MODES:
+            raise ValueError(f"confine must be one of {CONFINE_MODES}, got {confine!r}")
+        if (tile_width - _STRIDE) % 2 or tile_width < _STRIDE or tile_width % _STRIDE:
+            raise ValueError(f"tile_width must be a multiple of {_STRIDE} with even context, "
+                             f"got {tile_width}")
+        self.confine = confine
+        self.n_obs = n_obs
+        self.tile_width = tile_width
+        self.tile_chunk = tile_chunk
+        backbone = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
         self.stem = nn.Sequential(
             backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool,
             backbone.layer1, backbone.layer2, backbone.layer3,
@@ -68,13 +109,34 @@ class ResNetTeacher(nn.Module):
         b, c, nh, nw = feat.shape
         return feat.permute(0, 2, 3, 1).reshape(b, nh * nw, c)
 
+    def _layer3(self, x: torch.Tensor) -> torch.Tensor:
+        return self.stem(x.repeat(1, 3, 1, 1))
+
+    def _tiles(self, strips: torch.Tensor) -> torch.Tensor:
+        """``(N, 1, hs, W) -> (N, channels, 1, W // 16)``: one pooled descriptor
+        per cell, each computed from its own ``hs x tile_width`` crop."""
+        n, _, hs, w = strips.shape
+        pad = (self.tile_width - _STRIDE) // 2
+        crops = F.pad(strips, (pad, pad)).unfold(3, self.tile_width, _STRIDE)  # (N,1,hs,nw,tw)
+        nw = crops.shape[3]
+        crops = crops.permute(0, 3, 1, 2, 4).reshape(n * nw, 1, hs, self.tile_width)
+        out = [self._layer3(crops[i:i + self.tile_chunk]).mean(dim=(2, 3))
+               for i in range(0, len(crops), self.tile_chunk)]
+        return torch.cat(out).reshape(n, nw, self.channels).permute(0, 2, 1).unsqueeze(2)
+
     @torch.no_grad()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """``(B, 1, 96, 1024) -> (B, channels, nh, nw)`` spatial feature grid —
         the distillation target for ``scripts/distill_teacher.py``."""
-        x3 = x.repeat(1, 3, 1, 1)
-        feat = self.stem(x3)  # (B, channels, nh, nw)
-        assert feat.shape[-2:] == self.grid_size, (
-            f"expected grid {self.grid_size} from a (96,1024) input, got {tuple(feat.shape[-2:])}"
+        if self.confine == "none":
+            feat = self._layer3(x)
+        else:
+            strips = fold_observations(x, self.n_obs)
+            per_obs = self._layer3(strips) if self.confine == "obs" else self._tiles(strips)
+            feat = unfold_rows(per_obs, self.n_obs)
+        expected = (x.shape[2] // _STRIDE, x.shape[3] // _STRIDE)
+        assert tuple(feat.shape[-2:]) == expected, (
+            f"expected grid {expected} from a {tuple(x.shape[-2:])} input, "
+            f"got {tuple(feat.shape[-2:])}"
         )
         return feat

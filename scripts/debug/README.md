@@ -20,8 +20,11 @@ Findings: [`docs/03_teacher-localization.md`](../../docs/03_teacher-localization
   adopting any new teacher checkpoint or read-layer.**
 - `teacher_row_leakage_test.py` — training-free ON→OFF row-leakage probe; measures
   whether a teacher localizes an ON-only signal or bleeds it into OFF rows.
-  Supports four `--architecture` targets, each isolating one variable.
-- `resnet_teacher.py` — out-of-domain ResNet-18 teacher wrapper (paper-faithful route)
+  Supports four `--architecture` targets, each isolating one variable. Prints the
+  response of every feature row and checks that rows with no ON pixel in their
+  receptive field stay at zero; `--confine obs` applies ResNet-18 per observation.
+- `resnet_teacher.py` — out-of-domain ResNet-18 teacher wrapper (paper-faithful route);
+  `confine` = `none` (whole frame), `obs` (one observation) or `tile` (16×64 crop)
 - `udma_component_attribution.py` — is UDMA earning its complexity? Per-term budget,
   student redundancy, and AUC of each component against trivial baselines
 - `udma_anomaly_maps.py`, `smoke_test_udma.py` — map inspection and a fast wiring check

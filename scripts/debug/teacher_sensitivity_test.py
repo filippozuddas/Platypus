@@ -19,6 +19,11 @@ mechanism preview, each with a PRE-REGISTERED gate:
       S-T gap is zero regardless of training -> UDMA dead with this teacher.
       Gate G2: displacement AUC (affected vs unaffected tokens) >= 0.80 at
       SNR 20 (where recon scoring already detects, so the tokens MUST carry it).
+      The gate is read on the ON observations only ("G2-ON", 2026-11-13): the
+      injection is ON-only, and a teacher confined to one observation moves no
+      OFF token at all, so with OFF tokens among the negatives half of them are
+      ranked below every positive for free and the AUC starts near 0.75. The
+      all-token AUC is still printed, for continuity with earlier runs.
 
   T3. MECHANISM PREVIEW (linear student, closed-form — no training). Fit a
       ridge regression from raw patch pixels to teacher tokens on normal data
@@ -64,6 +69,8 @@ from scripts.debug.encode_separation_test import (
 )
 
 INPUT_SHAPE = (96, 1024, 1)
+N_OBS = 6
+ON_OBS = (0, 2, 4)
 
 # |delta-pixel| thresholds (standardized units) splitting tokens into
 # affected / unaffected by the injection. Per-frame median/MAD renormalisation
@@ -71,6 +78,29 @@ INPUT_SHAPE = (96, 1024, 1)
 # must sit above that drift but far below a line pixel (O(1) even at SNR 5).
 AFFECTED_THR = 0.5
 UNAFFECTED_THR = 0.05
+
+
+def on_observation_tokens(nh: int, nw: int) -> np.ndarray:
+    """Boolean ``(nh * nw,)`` mask, row-major: tokens whose grid row belongs to
+    an ON observation (obs 0/2/4)."""
+    rows_per_obs = nh // N_OBS
+    if rows_per_obs == 0:
+        raise ValueError(f"grid rows {nh} < {N_OBS} observations")
+    row_is_on = np.isin(np.arange(nh) // rows_per_obs, ON_OBS)
+    return np.repeat(row_is_on, nw)
+
+
+def token_groups(pmax: np.ndarray, on_tok: np.ndarray) -> tuple:
+    """Split tokens by how much the injection changed their pixels.
+
+    ``pmax`` is ``(N, n_tok)``, the largest ``|delta pixel|`` inside each
+    token's patch. Returns ``(affected, unaffected, unaffected_on)``:
+    ``unaffected_on`` keeps only the unaffected tokens of ON observations —
+    the negatives of the G2-ON gate.
+    """
+    affected = pmax > AFFECTED_THR
+    unaffected = pmax < UNAFFECTED_THR
+    return affected, unaffected, unaffected & on_tok[None, :]
 
 
 class _TeacherCNNGateAdapter:
@@ -140,6 +170,15 @@ def parse_args():
                         "— --checkpoint is T's trunk-only checkpoint.")
     p.add_argument("--checkpoint", type=Path, default=None,
                    help="Required for --architecture vit_mae/cnn_distilled; ignored for resnet18.")
+    p.add_argument("--confine", choices=["none", "obs", "tile"], default="none",
+                   help="resnet18 only: what each grid cell of P may see. none: the whole frame "
+                        "(July 2026 target). obs: its own observation (16 x 1024 strip). tile: a "
+                        "16 x 64 crop centred on the cell, pooled to one vector (Bergmann-style "
+                        "patch descriptor). See scripts/debug/resnet_teacher.py.")
+    p.add_argument("--random_weights", action="store_true",
+                   help="resnet18 only: untrained ResNet-18 instead of the ImageNet weights. A "
+                        "null for the gates — what any conv net of this shape scores — to read "
+                        "next to the pretrained run. Never a teacher candidate.")
     p.add_argument("--cache", type=Path, required=True)
     p.add_argument("--split", default="train")
     p.add_argument("--data_config", type=Path, default=ROOT / "configs/data/gbt_fine.yaml")
@@ -168,6 +207,8 @@ def main():
         raise SystemExit("scikit-learn required for this diagnostic.")
 
     args = parse_args()
+    if (args.confine != "none" or args.random_weights) and args.architecture != "resnet18":
+        raise SystemExit("--confine and --random_weights apply to --architecture resnet18 only.")
     rng = np.random.default_rng(args.seed)
 
     with open(args.data_config) as f:
@@ -175,11 +216,16 @@ def main():
 
     if args.architecture == "resnet18":
         from scripts.debug.resnet_teacher import ResNetTeacher
-        print("Loading ResNet-18 (ImageNet, frozen) as teacher candidate P")
-        model = ResNetTeacher().to(args.device)
+        weights = "RANDOM weights, null run" if args.random_weights else "ImageNet, frozen"
+        print(f"Loading ResNet-18 ({weights}) as teacher candidate P, confine={args.confine}")
+        if args.random_weights:
+            torch.manual_seed(args.seed)
+        model = ResNetTeacher(confine=args.confine,
+                              pretrained=not args.random_weights).to(args.device)
         ph = INPUT_SHAPE[0] // model.grid_size[0]
         pw = INPUT_SHAPE[1] // model.grid_size[1]
-        ckpt_tag = "resnet18_imagenet"
+        ckpt_tag = ("resnet18_random" if args.random_weights else "resnet18_imagenet") + (
+            "" if args.confine == "none" else f"_{args.confine}")
     elif args.architecture == "cnn_distilled":
         from src.models.udma import _load_teacher_cnn
         if args.checkpoint is None:
@@ -209,7 +255,11 @@ def main():
 
     nh, nw = INPUT_SHAPE[0] // ph, INPUT_SHAPE[1] // pw
     n_tok = nh * nw
-    layer_tag = "final" if args.layer == -1 else f"block{args.layer}"
+    if args.architecture == "resnet18":
+        layer_tag = "layer3"  # ResNetTeacher always reads layer3; --layer does not apply
+    else:
+        layer_tag = "final" if args.layer == -1 else f"block{args.layer}"
+    on_tok = on_observation_tokens(nh, nw)
     print(f"  Token grid: ({nh}, {nw}) = {n_tok} tokens, layer = {layer_tag}")
 
     # ---- data: quiet (injection sites) + RFI (negatives / normal mix) ----
@@ -273,9 +323,15 @@ def main():
     print(f"\n{'='*64}\nT2. RESPONSIVENESS — paired token displacement ||T(x+s) − T(x)||\n{'='*64}")
     print(f"  affected = token with max|Δpixel| > {AFFECTED_THR}; "
           f"unaffected < {UNAFFECTED_THR}; in-between excluded.")
+    print("  AUC_on  = negatives from the ON observations only (the gate, G2-ON);")
+    print("  AUC_all = negatives from all six observations (as printed before 2026-11);")
+    print("  disp/sigma = median displacement of affected tokens, RMS over channels, in units")
+    print("               of each channel's std on quiet tokens (comparable across variants).")
     hit_col = f"top{args.frame_topk}-hit"
-    print(f"\n  {'SNR':>5s}  {'n_aff/frame':>11s}  {'AUC':>6s}  {'cohen_d':>8s}  {hit_col:>9s}")
-    inj_frames_by_snr, aff_by_snr, t2_auc = {}, {}, {}
+    print(f"\n  {'SNR':>5s}  {'n_aff/frame':>11s}  {'AUC_on':>6s}  {'AUC_all':>7s}  "
+          f"{'cohen_d':>8s}  {hit_col:>9s}  {'disp/sigma':>10s}")
+    inj_frames_by_snr, aff_by_snr, t2_auc, t2_auc_all, t2_disp_norm = {}, {}, {}, {}, {}
+    sd_ch = tok_quiet.reshape(-1, D).std(axis=0) + 1e-6
     g2_ref_snr = 20.0
     for snr in args.snr_list:
         inj = np.array([preprocess_raw(
@@ -285,25 +341,30 @@ def main():
         inj_frames_by_snr[snr] = inj
         delta = np.abs(inj - f_quiet)
         pmax = patch_pixels(delta, ph, pw).max(axis=2)          # (Nq, n_tok)
-        affected = pmax > AFFECTED_THR
-        unaffected = pmax < UNAFFECTED_THR
+        affected, unaffected, unaffected_on = token_groups(pmax, on_tok)
         aff_by_snr[snr] = affected
         tok_inj = encode_tokens_layer(model, inj, args.device, args.layer)
-        disp = np.linalg.norm(tok_inj - tok_quiet, axis=2)      # (Nq, n_tok)
-        d_aff, d_un = disp[affected], disp[unaffected]
-        if len(d_aff) < 10:
-            print(f"  {snr:5.0f}  (too few affected tokens — skipped)")
+        dtok = tok_inj - tok_quiet
+        disp = np.linalg.norm(dtok, axis=2)                     # (Nq, n_tok)
+        d_aff, d_un, d_un_on = disp[affected], disp[unaffected], disp[unaffected_on]
+        if len(d_aff) < 10 or len(d_un_on) < 10:
+            print(f"  {snr:5.0f}  (too few affected / unaffected-ON tokens — skipped)")
             continue
-        y = np.concatenate([np.ones(len(d_aff)), np.zeros(len(d_un))])
-        auc = float(roc_auc_score(y, np.concatenate([d_aff, d_un])))
+        y = np.concatenate([np.ones(len(d_aff)), np.zeros(len(d_un_on))])
+        auc = float(roc_auc_score(y, np.concatenate([d_aff, d_un_on])))
         t2_auc[snr] = auc
+        y_all = np.concatenate([np.ones(len(d_aff)), np.zeros(len(d_un))])
+        t2_auc_all[snr] = float(roc_auc_score(y_all, np.concatenate([d_aff, d_un])))
+        t2_disp_norm[snr] = float(np.median(
+            np.sqrt(((dtok[affected] / sd_ch) ** 2).mean(axis=1))))
         topk_ids = np.argsort(disp, axis=1)[:, -args.frame_topk:]
         hit = float(np.mean([affected[i, topk_ids[i]].any() for i in range(len(disp))]) * 100)
-        print(f"  {snr:5.0f}  {affected.sum(1).mean():11.1f}  {auc:6.3f}  "
-              f"{cohens_d(d_aff, d_un):8.2f}  {hit:8.1f}%")
+        print(f"  {snr:5.0f}  {affected.sum(1).mean():11.1f}  {auc:6.3f}  {t2_auc_all[snr]:7.3f}  "
+              f"{cohens_d(d_aff, d_un_on):8.2f}  {hit:8.1f}%  {t2_disp_norm[snr]:10.3f}")
     g2 = t2_auc.get(g2_ref_snr, 0.0) >= 0.80
-    print(f"\n  G2 (displacement AUC >= 0.80 @ SNR {g2_ref_snr:.0f}): "
-          f"{'PASS' if g2 else 'FAIL'}  ({t2_auc.get(g2_ref_snr, float('nan')):.3f})")
+    print(f"\n  G2-ON (displacement AUC, ON observations only, >= 0.80 @ SNR {g2_ref_snr:.0f}): "
+          f"{'PASS' if g2 else 'FAIL'}  ({t2_auc.get(g2_ref_snr, float('nan')):.3f})"
+          f"   [all-token AUC, not a gate: {t2_auc_all.get(g2_ref_snr, float('nan')):.3f}]")
 
     # ================= T3: linear-student mechanism preview =================
     print(f"\n{'='*64}\nT3. LINEAR-STUDENT PREVIEW — ridge patch-pixels -> teacher token\n{'='*64}")
@@ -386,7 +447,7 @@ def main():
 
     # ================= verdict =================
     print(f"\n{'='*64}\nVERDICT (teacher = {ckpt_tag}, layer = {layer_tag})\n{'='*64}")
-    for name, ok in [("G1 collapse", g1), ("G2 responsiveness", g2),
+    for name, ok in [("G1 collapse", g1), ("G2-ON responsiveness", g2),
                      ("G3a token residual", g3a), ("G3b frame preview", g3b)]:
         print(f"  {name:22s}: {'PASS' if ok else 'FAIL'}")
     if not g2:
@@ -410,7 +471,12 @@ def main():
     np.savez(out_npz,
              rel_std=rel_std, pr_rank_pooled=pr_pooled, pr_rank_content=pr_content,
              snr_list=np.array(sorted(t2_auc)),
-             t2_auc=np.array([t2_auc[s] for s in sorted(t2_auc)]),
+             t2_auc=np.array([t2_auc[s] for s in sorted(t2_auc)]),            # G2-ON
+             t2_auc_all=np.array([t2_auc_all[s] for s in sorted(t2_auc)]),    # all-token AUC
+             t2_disp_norm=np.array([t2_disp_norm[s] for s in sorted(t2_auc)]),
+             confine=args.confine, seed=args.seed,
+             # pool indices of the quiet/RFI frames: equal across runs <=> paired comparison
+             quiet_idx=pool_idx[quiet_sel], rfi_idx=pool_idx[rfi_sel],
              t3_tok_auc=np.array([t3_tok_auc.get(s, np.nan) for s in sorted(t2_auc)]),
              matched=np.array([mm.get("energy_only", np.nan), mm.get("trivial", np.nan),
                                mm.get("recon", np.nan)]) if mm and "error" not in mm

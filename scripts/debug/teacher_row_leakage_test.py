@@ -26,6 +26,15 @@ Cost: n_frames * len(snr_list) * len(stages) frozen forwards. No training.
 Outcome (2026-07-16): all three hypotheses refuted; only domain-matched
 training localizes. Full record in ``docs/03_teacher-localization.md``.
 
+Besides the ON/OFF means the probe prints and saves the response of every
+feature row. For ResNet-18 the rows whose receptive field holds no ON pixel
+are known from the geometry (``expected_clean_off_rows``): they must stay at
+numerical zero, since the OFF pixels do not change. This is a check of the
+instrument, with a PASS/FAIL line — a clean row that moves means the test has
+a leakage path other than the receptive field (preprocessing, BatchNorm, the
+injector). ``--confine obs`` applies ResNet-18 to each observation on its own,
+where every OFF row is clean.
+
 Usage (run on the data host; --cache must point at a preprocessed cache):
 
     # out-of-domain CNN, receptive-field sweep -- default
@@ -46,6 +55,9 @@ Usage (run on the data host; --cache must point at a preprocessed cache):
     # ConvNeXt V2 / FCMAE control
     python scripts/debug/teacher_row_leakage_test.py \
         --architecture convnextv2_fcmae --cache <cache_dir>
+
+    # ResNet-18 confined to one observation at a time
+    python scripts/debug/teacher_row_leakage_test.py --confine obs --cache <cache_dir>
 """
 
 import argparse
@@ -61,6 +73,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from scripts.debug.injection_vs_rfi_test import preprocess_raw, inject_narrowband_on_only
+from src.models.observation_fold import fold_observations, unfold_rows
 
 INPUT_SHAPE = (96, 1024, 1)
 INPUT_HW = (96, 1024)
@@ -72,6 +85,31 @@ ON_OBS = (0, 2, 4)
 # boundary). Values are ResNet-18 theoretical max RF on a (96,1024) input.
 STAGE_RF = {"stem": 11, "layer1": 43, "layer2": 99, "layer3": 211}
 STAGES = ("stem", "layer1", "layer2", "layer3")
+# Stage -> vertical stride (px per feature row). Every strided layer of
+# ResNet-18 pads symmetrically, so feature row ``i`` is centred on input row
+# ``stride * i`` and sees ``stride * i ± (STAGE_RF - 1) / 2``, cut at the frame.
+STAGE_STRIDE = {"stem": 4, "layer1": 4, "layer2": 8, "layer3": 16}
+OBS_PX = INPUT_HW[0] // N_OBS
+
+
+def expected_clean_off_rows(stage: str, confine: str = "none") -> np.ndarray:
+    """Feature rows of OFF observations whose receptive field holds no ON
+    pixel, for ResNet-18 at ``stage``. Confined to one observation, every OFF
+    row is clean."""
+    stride = STAGE_STRIDE[stage]
+    nh = INPUT_HW[0] // stride
+    rows_per_obs = nh // N_OBS
+    half = (STAGE_RF[stage] - 1) // 2
+    clean = []
+    for i in range(nh):
+        if (i // rows_per_obs) in ON_OBS:
+            continue
+        if confine == "none":
+            lo, hi = max(0, stride * i - half), min(INPUT_HW[0] - 1, stride * i + half)
+            if any((r // OBS_PX) in ON_OBS for r in range(lo, hi + 1)):
+                continue
+        clean.append(i)
+    return np.array(clean, dtype=int)
 
 
 class ResNetStages(nn.Module):
@@ -80,10 +118,11 @@ class ResNetStages(nn.Module):
     replicated to 3 channels with NO ImageNet mean/std renorm — same deliberate
     simplification as ``ResNetTeacher`` (the gate validated it)."""
 
-    def __init__(self):
+    def __init__(self, pretrained: bool = True):
         super().__init__()
         from torchvision.models import ResNet18_Weights, resnet18
-        b = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+        # pretrained=False: random weights, for geometry tests (no download).
+        b = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
         self.stem = nn.Sequential(b.conv1, b.bn1, b.relu, b.maxpool)
         self.layer1 = b.layer1
         self.layer2 = b.layer2
@@ -111,6 +150,20 @@ class ResNetStages(nn.Module):
         if stage == "layer3":
             return h
         raise ValueError(f"unknown stage {stage!r}")
+
+
+class ObsConfined(nn.Module):
+    """Any ``features(x, stage)`` model applied to each observation on its own:
+    the frame is folded into ``N_OBS`` strips, and the strips' feature rows are
+    stacked back in observation order."""
+
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+
+    @torch.no_grad()
+    def features(self, x: torch.Tensor, stage: str) -> torch.Tensor:
+        return unfold_rows(self.model.features(fold_observations(x, N_OBS), stage), N_OBS)
 
 
 CONVNEXT_STAGES = ("stem", "stage0", "stage1", "stage2")
@@ -276,25 +329,60 @@ def row_on_off_masks(nh: int) -> tuple:
 
 
 @torch.no_grad()
-def stage_displacement(model, f_clean, f_inj, stage, device, batch=32):
-    """Per-frame ON-row and OFF-row response to the injection at one stage.
+def row_displacement(model, f_clean, f_inj, stage, device, batch=32) -> np.ndarray:
+    """Response of every feature row to the injection at one stage.
 
-    Returns (on_resp, off_resp): each (N,) = per-frame mean over that group's
-    feature rows of the row's MAX displacement over the frequency axis (mirrors
-    ``full_row_hits``'s per-row max, no column window)."""
-    on_resp, off_resp = [], []
+    Returns (N, nh): per frame, each feature row's MAX displacement over the
+    frequency axis (mirrors ``full_row_hits``'s per-row max, no column window)."""
+    rows = []
     for i in range(0, len(f_clean), batch):
         xc = torch.from_numpy(f_clean[i:i + batch]).float().unsqueeze(1).to(device)
         xi = torch.from_numpy(f_inj[i:i + batch]).float().unsqueeze(1).to(device)
-        fc = model.features(xc, stage)
-        fi = model.features(xi, stage)
-        disp = (fi - fc).norm(dim=1)                 # (b, nh, nw)
-        row_max = disp.max(dim=2).values.cpu().numpy()  # (b, nh)
-        nh = row_max.shape[1]
-        on_mask, off_mask = row_on_off_masks(nh)
-        on_resp.append(row_max[:, on_mask].mean(axis=1))
-        off_resp.append(row_max[:, off_mask].mean(axis=1))
-    return np.concatenate(on_resp), np.concatenate(off_resp)
+        disp = (model.features(xi, stage) - model.features(xc, stage)).norm(dim=1)  # (b, nh, nw)
+        rows.append(disp.max(dim=2).values.cpu().numpy())
+    return np.concatenate(rows)
+
+
+def on_off_response(row_max: np.ndarray) -> tuple:
+    """(N, nh) row responses -> (on_resp, off_resp), each (N,): per-frame mean
+    over that group's feature rows."""
+    on_mask, off_mask = row_on_off_masks(row_max.shape[1])
+    return row_max[:, on_mask].mean(axis=1), row_max[:, off_mask].mean(axis=1)
+
+
+def stage_displacement(model, f_clean, f_inj, stage, device, batch=32):
+    """Per-frame ON-row and OFF-row response to the injection at one stage."""
+    return on_off_response(row_displacement(model, f_clean, f_inj, stage, device, batch))
+
+
+def leak_criterion(profile: np.ndarray, clean_off: np.ndarray, zero_tol: float) -> dict:
+    """Instrument check on a per-row profile ``(nh,)`` (mean over frames).
+
+    The rows in ``clean_off`` see no ON pixel, so they must not respond:
+    passes when the largest of them is at most ``zero_tol`` times the mean ON
+    row. ``off_share_dirty`` is the fraction of the summed OFF response held by
+    the remaining OFF rows (1.0 when all the leak is where geometry puts it).
+    """
+    on_mask, off_mask = row_on_off_masks(len(profile))
+    on_mean = float(profile[on_mask].mean())
+    clean = np.zeros(len(profile), dtype=bool)
+    clean[clean_off] = True
+    dirty = off_mask & ~clean
+    off_sum = float(profile[off_mask].sum())
+    max_clean = float(profile[clean].max()) if clean.any() else float("nan")
+    return {
+        "on_mean": on_mean,
+        "max_clean_frac": max_clean / (on_mean + 1e-12),
+        "off_share_dirty": float(profile[dirty].sum()) / off_sum if off_sum > 0 else float("nan"),
+        "n_clean": int(clean.sum()),
+        "n_dirty": int(dirty.sum()),
+        "passed": bool(clean.any() and max_clean <= zero_tol * on_mean),
+    }
+
+
+def _fmt_ratio(on_m: float, off_m: float) -> str:
+    """ON/OFF for the printout; an OFF response of exactly zero has no ratio."""
+    return "inf" if off_m == 0 else f"{on_m / off_m:.2f}"
 
 
 def parse_args():
@@ -332,6 +420,15 @@ def parse_args():
     p.add_argument("--convnext_stages", nargs="+", default=list(CONVNEXT_STAGES),
                    choices=CONVNEXT_STAGES,
                    help="ConvNeXt V2 depth stages to sweep (convnextv2_fcmae only).")
+    p.add_argument("--confine", choices=["none", "obs"], default="none",
+                   help="resnet18 only. obs: apply the network to each observation on its own "
+                        "(16-px strips), so no feature row can see another observation.")
+    p.add_argument("--random_weights", action="store_true",
+                   help="resnet18 only: untrained ResNet-18 instead of the ImageNet weights — "
+                        "what the geometry alone gives, to read next to the pretrained run.")
+    p.add_argument("--zero_tol", type=float, default=1e-3,
+                   help="A clean OFF row counts as zero when its response is at most this "
+                        "fraction of the mean ON row (GPU convolutions are not bit-exact).")
     p.add_argument("--out_dir", type=Path, default=ROOT / "outputs/sweeps/teacher_row_leakage")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--seed", type=int, default=42)
@@ -340,6 +437,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if (args.confine != "none" or args.random_weights) and args.architecture != "resnet18":
+        raise SystemExit("--confine and --random_weights apply to --architecture resnet18 only.")
     rng = np.random.default_rng(args.seed)
 
     with open(args.data_config) as f:
@@ -375,10 +474,17 @@ def main():
         stages = args.convnext_stages
         rf_label = {s: CONVNEXT_RF[s] for s in stages}
     else:
-        print("Loading ResNet-18 (ImageNet, frozen) — teacher P, all stages")
-        model = ResNetStages().to(args.device)
+        print(f"Loading ResNet-18 ({'RANDOM weights' if args.random_weights else 'ImageNet'}, "
+              "frozen) — teacher P, all stages"
+              + (" — confined to one observation" if args.confine == "obs" else ""))
+        if args.random_weights:
+            torch.manual_seed(args.seed)
+        model = ResNetStages(pretrained=not args.random_weights).to(args.device)
+        if args.confine == "obs":
+            model = ObsConfined(model)
         stages = args.stages
-        rf_label = {s: f"{STAGE_RF[s]}px" for s in stages}
+        rf_label = {s: (f"{OBS_PX}px" if args.confine == "obs" else f"{STAGE_RF[s]}px")
+                    for s in stages}
 
     # ---- quiet injection sites (lowest hot-fraction), same selection as the gate ----
     npy_path = Path(args.cache) / f"{args.split}.npy"
@@ -396,6 +502,7 @@ def main():
     print(f"  Quiet frames: {len(quiet_sel)}")
 
     results = {}  # (stage, snr) -> (on_mean, off_mean, ratio)
+    profiles = {}  # (stage, snr) -> (nh,) mean response of each feature row
     for snr in args.snr_list:
         f_inj = np.array([
             preprocess_raw(
@@ -405,7 +512,9 @@ def main():
             for i in range(len(raw_quiet))
         ])
         for stage in stages:
-            on_resp, off_resp = stage_displacement(model, f_quiet, f_inj, stage, args.device)
+            row_max = row_displacement(model, f_quiet, f_inj, stage, args.device)
+            profiles[(stage, snr)] = row_max.mean(axis=0)
+            on_resp, off_resp = on_off_response(row_max)
             on_m, off_m = float(on_resp.mean()), float(off_resp.mean())
             ratio = on_m / (off_m + 1e-12)
             results[(stage, snr)] = (on_m, off_m, ratio)
@@ -420,7 +529,58 @@ def main():
         print(f"    {'stage':>8s}  {'vert.RF':>7s}  {'ON_resp':>9s}  {'OFF_resp':>9s}  {'ON/OFF':>7s}")
         for stage in stages:
             on_m, off_m, ratio = results[(stage, snr)]
-            print(f"    {stage:>8s}  {rf_label[stage]:>7s}  {on_m:9.4f}  {off_m:9.4f}  {ratio:7.2f}")
+            print(f"    {stage:>8s}  {rf_label[stage]:>7s}  {on_m:9.4f}  {off_m:9.4f}  "
+                  f"{_fmt_ratio(on_m, off_m):>7s}")
+
+    # ---- per-row profile: where in the OFF observations the response sits ----
+    is_resnet = args.architecture == "resnet18"
+    print(f"\n{'='*72}")
+    print("PER-ROW PROFILE  (row response / mean ON row; OFF pixels are unchanged,")
+    print("so an OFF row can move only if its receptive field holds ON pixels)")
+    print(f"{'='*72}")
+    for stage in stages:
+        nh = len(profiles[(stage, args.snr_list[0])])
+        rows_per_obs = nh // N_OBS
+        on_mask, _ = row_on_off_masks(nh)
+        clean = set(expected_clean_off_rows(stage, args.confine).tolist()) if is_resnet else set()
+        print(f"\n  {stage}  ({nh} rows, {rows_per_obs} per observation)")
+        print(f"    {'row':>3s}  {'obs':>3s}  {'':3s}  "
+              + "  ".join(f"{'SNR ' + format(s, 'g'):>8s}" for s in args.snr_list)
+              + ("  geometry" if is_resnet else ""))
+        for i in range(nh):
+            frac = [profiles[(stage, s)][i] / (profiles[(stage, s)][on_mask].mean() + 1e-12)
+                    for s in args.snr_list]
+            tag = ""
+            if is_resnet and not on_mask[i]:
+                tag = "  no ON px" if i in clean else "  sees ON px"
+            print(f"    {i:3d}  {i // rows_per_obs:3d}  {'ON ' if on_mask[i] else 'OFF'}  "
+                  + "  ".join(f"{f:8.4f}" for f in frac) + tag)
+
+    # ---- instrument check (resnet18): rows that see no ON pixel must not move ----
+    criteria = {}
+    if is_resnet:
+        print(f"\n{'='*72}")
+        print(f"INSTRUMENT CHECK  (clean OFF rows <= {args.zero_tol:g} x mean ON row)")
+        print(f"{'='*72}")
+        for stage in stages:
+            clean = expected_clean_off_rows(stage, args.confine)
+            if len(clean) == 0:
+                print(f"  {stage:>8s}: every OFF row sees ON pixels — nothing to check")
+                continue
+            checks = [leak_criterion(profiles[(stage, s)], clean, args.zero_tol)
+                      for s in args.snr_list]
+            criteria[stage] = checks
+            worst = max(c["max_clean_frac"] for c in checks)
+            share = min(c["off_share_dirty"] for c in checks)
+            ok = all(c["passed"] for c in checks)
+            share_txt = f"{share:.4f}" if checks[0]["n_dirty"] else "n/a (no such rows)"
+            print(f"  {stage:>8s}: clean rows {clean.tolist()}  max response {worst:.2e} x ON  "
+                  f"|  OFF response in the rows that see ON px: {share_txt}  "
+                  f"[{'PASS' if ok else 'FAIL'}]")
+        if any(not all(c["passed"] for c in v) for v in criteria.values()):
+            print("\n  FAIL: a row with no ON pixel in its receptive field moved. The probe has a\n"
+                  "  leakage path other than the receptive field (preprocessing, BatchNorm mode,\n"
+                  "  the injector touching OFF frames). Find it before reading any ratio above.")
 
     # Headline: ratio trend across stages at the highest SNR (clearest signal).
     ref_snr = max(args.snr_list)
@@ -429,7 +589,8 @@ def main():
     for stage in stages:
         tag = ("LOCALIZED" if ratios[stage] >= 3.0
                else "partial" if ratios[stage] >= 1.5 else "DIFFUSE")
-        print(f"  {stage:>8s} (RF~{rf_label[stage]}): ON/OFF = {ratios[stage]:.2f}  [{tag}]")
+        on_m, off_m, _ = results[(stage, ref_snr)]
+        print(f"  {stage:>8s} (RF~{rf_label[stage]}): ON/OFF = {_fmt_ratio(on_m, off_m)}  [{tag}]")
     if args.architecture == "vit_mae":
         print("\n  Read: this is the domain-matched teacher's localizing ON/OFF ratio at its\n"
               "  deployed block — the apples-to-apples reference for the ResNet stages (which\n"
@@ -454,13 +615,17 @@ def main():
               "  needed. If it stays diffuse like resnet18, domain-matching is confirmed\n"
               "  necessary regardless of pretraining objective.")
     else:
-        print("\n  Read: if a shallow stage recovers a high ratio while layer3 is ~1, the RF is\n"
-              "  the lever and the small-RF teacher is worth a distill+retrain run. If every\n"
-              "  stage stays near 1, the ImageNet-P leakage is not RF-driven -> that route is a\n"
-              "  dead end (keep the domain-matched teacher / try a shallow anisotropic teacher).")
+        print("\n  Read: the ON/OFF mean mixes OFF rows that see ON pixels with rows that do not,\n"
+              "  so read it together with the per-row profile above. A stage tests confinement\n"
+              "  only if its OFF rows hold no ON pixel; without --confine obs that is true of\n"
+              "  4 stem rows out of 12 and of no row from layer1 on.")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     out_tag = args.architecture
+    if args.random_weights:
+        out_tag = f"{out_tag}_random"
+    if args.confine != "none":
+        out_tag = f"{out_tag}_{args.confine}"
     if args.architecture == "udma_student":
         out_tag = f"udma_student_{args.student}_{args.checkpoint.parents[1].name}"
     out_npz = args.out_dir / f"teacher_row_leakage_{out_tag}.npz"
@@ -472,6 +637,17 @@ def main():
         on_resp=np.array([[results[(s, snr)][0] for s in stages] for snr in args.snr_list]),
         off_resp=np.array([[results[(s, snr)][1] for s in stages] for snr in args.snr_list]),
         ratio=np.array([[results[(s, snr)][2] for s in stages] for snr in args.snr_list]),
+        confine=args.confine,
+        seed=args.seed,
+        n_frames=len(quiet_sel),
+        frame_idx=pool_idx[quiet_sel],
+        # per-row profiles, one array (n_snr, nh) per stage (nh differs by stage)
+        **{f"row_profile_{s}": np.array([profiles[(s, snr)] for snr in args.snr_list])
+           for s in stages},
+        **{f"clean_off_rows_{s}": expected_clean_off_rows(s, args.confine)
+           for s in stages if is_resnet},
+        instrument_check=np.array([all(c["passed"] for c in criteria[s]) if s in criteria
+                                   else True for s in stages]) if is_resnet else np.array([]),
     )
     print(f"\nSaved -> {out_npz}")
 
