@@ -12,7 +12,7 @@ no dated correspondence and no superseded material in this directory.
 |---|---|---|
 | 01 | [Scoring history](01_scoring-history.md) | Why does this project not just use reconstruction error? |
 | 02 | [UDMA architecture](02_udma-architecture.md) | What is the production model, and how does it relate to the paper it adapts? |
-| 03 | [Teacher localization](03_teacher-localization.md) | Why is the teacher domain-matched instead of paper-faithful? |
+| 03 | [Teacher localization](03_teacher-localization.md) | Why is the teacher radio-trained instead of paper-faithful, and is that still needed? |
 | 04 | [Candidate filtering](04_candidate-filtering.md) | How does a scored snippet become a candidate a human looks at? |
 | 05 | [Results and limitations](05_results.md) | Does it work, and what is still broken? |
 | 06 | [Threshold audit](06_threshold-audit.md) | Is the pipeline actually searching everything it scans? |

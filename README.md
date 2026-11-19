@@ -248,7 +248,7 @@ lives in [`docs/`](docs/README.md).
 |---|---|
 | [`01_scoring-history.md`](docs/01_scoring-history.md) | **Start here.** Why reconstruction error fails, and the five scorer families that failed before UDMA |
 | [`02_udma-architecture.md`](docs/02_udma-architecture.md) | The production model, its pre-registered acceptance bars, and how it relates to Qi et al. 2024 |
-| [`03_teacher-localization.md`](docs/03_teacher-localization.md) | Why the teacher is domain-matched, and the three refuted hypotheses behind that choice |
+| [`03_teacher-localization.md`](docs/03_teacher-localization.md) | Why the teacher is a radio-trained ViT-MAE, the July 2026 experiments behind that choice, and their 2026-11 re-examination |
 | [`04_candidate-filtering.md`](docs/04_candidate-filtering.md) | Detection thresholds, the OFF-noise ceiling, ON/OFF short-list rules |
 | [`05_results.md`](docs/05_results.md) | Validation results and known limitations |
 
