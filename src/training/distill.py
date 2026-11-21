@@ -9,6 +9,12 @@ features on in-domain data.
 
 Loss: ``L = ||D(T(x)) - P(x)||^2``, MSE over the full feature grid, no
 normalization (raw feature values on both sides).
+
+``per_observation=True`` trains T on one observation at a time (its trunk is
+built for ``tchans // n_obs`` rows and applied to each observation of the
+frame), so T's grid row ``k`` depends on observation ``k`` only. Pair it with
+a P that is confined the same way (``ResNetTeacher(confine="obs")``): a T
+confined by architecture cannot reproduce a target that mixes observations.
 """
 
 import time
@@ -19,6 +25,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from src.models.encoder import build_encoder
+from src.models.observation_fold import PerObservation
 
 __all__ = ["build_trainable_trunk", "distill_teacher"]
 
@@ -64,6 +71,8 @@ def distill_teacher(
     weight_decay: float = 0.01,
     log_every_n_steps: int = 50,
     log_fn: Callable[[str], None] = print,
+    per_observation: bool = False,
+    n_obs: int = 6,
 ) -> Tuple[nn.Module, List[float]]:
     """Train T (+ a discardable D) to reproduce frozen ``P``'s features.
 
@@ -74,6 +83,9 @@ def distill_teacher(
             matches ``P.grid_size`` before training starts.
         p_channels: ``P``'s output channel count (``D`` projects T's
             ``latent_dim`` up to this for the loss only).
+        per_observation: train T's trunk on single observations (module
+            docstring). The returned trunk is the per-observation one, to be
+            loaded with ``TeacherCNN(per_observation=True)``.
 
     Returns:
         ``(T, losses)`` — the trained trunk (``D`` is discarded) and the
@@ -87,16 +99,25 @@ def distill_teacher(
             otherwise silently produce an untrained, unsaved T.
     """
     n_blocks = len(filters)
-    t_grid = (input_shape[0] // (2 ** n_blocks), input_shape[1] // (2 ** n_blocks))
+    factor = 2 ** n_blocks
+    th, fw, c = input_shape
+    t_grid = (th // factor, fw // factor)
     if t_grid != P.grid_size:
         raise ValueError(
-            f"T's trunk grid {t_grid} (input {input_shape[:2]} / {2 ** n_blocks}) must match "
+            f"T's trunk grid {t_grid} (input {input_shape[:2]} / {factor}) must match "
             f"P's grid {P.grid_size} -- adjust filters."
         )
+    if per_observation and (th % n_obs or (th // n_obs) % factor):
+        raise ValueError(
+            f"per_observation: tchans {th} must split into {n_obs} observations of a "
+            f"multiple of {factor} rows."
+        )
 
+    trunk_shape = (th // n_obs, fw, c) if per_observation else input_shape
     T = build_trainable_trunk(
-        input_shape, filters, latent_dim, kernel_size, activation, use_batchnorm, convs_per_block,
+        trunk_shape, filters, latent_dim, kernel_size, activation, use_batchnorm, convs_per_block,
     ).to(device)
+    T_frame = PerObservation(T, n_obs) if per_observation else T
     D = nn.Conv2d(latent_dim, p_channels, 1).to(device)
 
     optimizer = torch.optim.AdamW(
@@ -116,7 +137,7 @@ def distill_teacher(
             with torch.no_grad():
                 target = P(x)
 
-            pred = D(T(x))
+            pred = D(T_frame(x))
             loss = F.mse_loss(pred, target)
 
             optimizer.zero_grad()

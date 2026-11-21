@@ -17,12 +17,28 @@ convs_per_block 2), latent_dim=128 (D8). Training itself lives in
 src/training/distill.py; this script is a thin CLI wrapper (loads data/P,
 calls distill_teacher(), saves the result).
 
+``--per_observation`` confines both sides to one observation at a time: P is
+``ResNetTeacher(confine="obs")`` and T's trunk is trained on single
+observations (``src/training/distill.py``), so the distilled teacher's grid
+row ``k`` depends on observation ``k`` only. See
+docs/03_teacher-localization.md §4.2.
+
 Usage (server, not dev machine):
     CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/Platypus \\
     python scripts/distill_teacher.py \\
         --config configs/training/udma_gbt_fine_control_bs256.yaml \\
         --epochs 2 --lr 1e-3 \\
         --out outputs/udma_teacher_distill/cnn_distilled_resnet18.pt
+
+    # confined to one observation, night-split training data
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/Platypus \\
+    python scripts/distill_teacher.py \\
+        --config configs/training/udma_gbt_fine_cnn_obs.yaml --per_observation \\
+        --epochs 2 --lr 1e-3 \\
+        --out outputs/udma_teacher_distill/cnn_obs_resnet18_nightsplit.pt
+
+An existing ``--out`` is never overwritten; a provenance record is written next
+to it as ``<out>.json``.
 """
 
 import argparse
@@ -43,6 +59,7 @@ from scripts.debug.resnet_teacher import ResNetTeacher
 from src.data.torch_dataset import build_datasets
 from src.training.distill import distill_teacher
 from src.utils.config import load_config
+from src.utils.provenance import write_provenance
 
 DEFAULT_FILTERS = [32, 64, 128, 256]
 T_LATENT_DIM = 128
@@ -66,6 +83,10 @@ def parse_args():
                    help="Default: use --config's training.batch_size.")
     p.add_argument("--filters", type=int, nargs="+", default=DEFAULT_FILTERS)
     p.add_argument("--convs_per_block", type=int, default=2)
+    p.add_argument("--per_observation", action="store_true",
+                   help="Confine P and T to one observation at a time (module docstring).")
+    p.add_argument("--n_obs", type=int, default=6,
+                   help="Observations stacked along time (with --per_observation).")
     p.add_argument("--out", type=Path, required=True,
                    help="Output checkpoint path for T's trunk (no D, no optimizer state).")
     p.add_argument("--device", default=None,
@@ -78,6 +99,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.out.exists():
+        raise SystemExit(f"{args.out} already exists; choose another --out")
     pl.seed_everything(args.seed)
 
     cfg = load_config(args.config)
@@ -106,11 +129,13 @@ def main():
         num_workers=cfg["hardware"].get("num_workers", 4), drop_last=True,
     )
 
-    print(f"Loading P (frozen ResNet-18, ImageNet, layer3) on {device}")
-    P = ResNetTeacher().to(device)
+    confine = "obs" if args.per_observation else "none"
+    print(f"Loading P (frozen ResNet-18, ImageNet, layer3, confine={confine}) on {device}")
+    P = ResNetTeacher(confine=confine, n_obs=args.n_obs).to(device)
     P.eval()
 
-    print(f"Distilling T (filters={args.filters}, latent_dim={T_LATENT_DIM}) "
+    print(f"Distilling T (filters={args.filters}, latent_dim={T_LATENT_DIM}, "
+          f"per_observation={args.per_observation}) "
           f"+ D (1x1 {T_LATENT_DIM}->{P.channels}, distillation-only)")
     T, losses = distill_teacher(
         P, loader, input_shape, device,
@@ -119,6 +144,7 @@ def main():
         convs_per_block=args.convs_per_block,
         epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay,
         log_every_n_steps=args.log_every_n_steps,
+        per_observation=args.per_observation, n_obs=args.n_obs,
     )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -130,9 +156,16 @@ def main():
         "activation": T_ACTIVATION,
         "use_batchnorm": T_USE_BATCHNORM,
         "convs_per_block": args.convs_per_block,
+        "per_observation": args.per_observation,
+        "n_obs": args.n_obs,
+        "p_confine": confine,
         "final_loss": losses[-1],
     }, args.out)
     print(f"Saved T (trunk only, no D) -> {args.out}")
+    write_provenance(args.out.with_name(args.out.name + ".json"), cfg,
+                     n_train_snippets=len(train_ds), epochs=args.epochs, lr=args.lr,
+                     batch_size=batch_size, per_observation=args.per_observation,
+                     p_confine=confine, final_loss=losses[-1], n_steps=len(losses))
 
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(losses, linewidth=0.5)

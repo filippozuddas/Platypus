@@ -257,6 +257,8 @@ def main():
     n_tok = nh * nw
     if args.architecture == "resnet18":
         layer_tag = "layer3"  # ResNetTeacher always reads layer3; --layer does not apply
+    elif args.architecture == "cnn_distilled":
+        layer_tag = "trunk"  # the distilled trunk's output; --layer does not apply
     else:
         layer_tag = "final" if args.layer == -1 else f"block{args.layer}"
     on_tok = on_observation_tokens(nh, nw)

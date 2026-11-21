@@ -8,8 +8,9 @@ labelled OFF must not move when only ON pixels change.
 """
 
 import torch
+from torch import nn
 
-__all__ = ["fold_observations", "unfold_rows"]
+__all__ = ["fold_observations", "unfold_rows", "PerObservation"]
 
 
 def fold_observations(x: torch.Tensor, n_obs: int = 6) -> torch.Tensor:
@@ -33,3 +34,21 @@ def unfold_rows(f: torch.Tensor, n_obs: int = 6) -> torch.Tensor:
         raise ValueError(f"batch {bn} is not a multiple of n_obs={n_obs}")
     b = bn // n_obs
     return f.reshape(b, n_obs, c, nh, nw).permute(0, 2, 1, 3, 4).reshape(b, c, n_obs * nh, nw)
+
+
+class PerObservation(nn.Module):
+    """Apply ``module`` to each observation on its own and stack the resulting
+    feature rows back in observation order.
+
+    ``module`` maps ``(N, C, H // n_obs, W)`` to ``(N, C', nh, nw)``; the
+    wrapper maps ``(B, C, H, W)`` to ``(B, C', n_obs * nh, nw)``. Its
+    ``state_dict`` keys are the module's, prefixed by ``module.``.
+    """
+
+    def __init__(self, module: nn.Module, n_obs: int = 6):
+        super().__init__()
+        self.module = module
+        self.n_obs = n_obs
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return unfold_rows(self.module(fold_observations(x, self.n_obs)), self.n_obs)

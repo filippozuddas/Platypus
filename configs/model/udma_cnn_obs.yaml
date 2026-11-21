@@ -1,0 +1,55 @@
+# UDMA model config — distilled CNN teacher confined to one observation
+# ("cnn_obs", phase 06a, 2026-11).
+#
+# Paper-faithful teacher route (Qi et al. 2024, Eq. 2; Bergmann et al. 2020):
+# teacher = TeacherCNN distilled from a frozen ImageNet ResNet-18 (layer3),
+# with both P and T applied to each 16 x 1024 observation on its own
+# (scripts/distill_teacher.py --per_observation). Grid row k of the teacher
+# then depends on observation k only, so an ON-only signal cannot move an OFF
+# row of the distillation target. The July 2026 distilled teacher
+# (udma_cnn_teacher.yaml) used a whole-frame target and leaked into the OFF
+# rows; see docs/03_teacher-localization.md §4.2.
+#
+# Everything else is the night-split reference (udma_nightsplit.yaml):
+# students on the whole frame, 500 memory slots, shrink 0.002, topk 0.01.
+# Only the teacher differs, so a comparison with the reference moves one
+# variable.
+
+architecture: udma
+
+# --- Teacher (frozen, distilled, per observation) ---
+# per_observation is read from the checkpoint itself (_load_teacher_cnn).
+# Both files are written on the night-split training data only:
+#   distill_teacher.py --config configs/training/udma_gbt_fine_cnn_obs.yaml --per_observation
+#   fit_udma_teacher_norm.py --config configs/training/udma_gbt_fine_cnn_obs.yaml
+teacher:
+  type: cnn_distilled
+  checkpoint: outputs/udma_teacher_distill/cnn_obs_resnet18_nightsplit.pt
+  norm_stats: outputs/udma_teacher_norm/cnn_obs_nightsplit.pt
+
+# --- Students (from-scratch trunk, Q3) --- identical to udma_nightsplit.yaml
+student:
+  encoder:
+    filters: [32, 64, 128, 256]
+    convs_per_block: 2
+    kernel_size: [3, 3]
+    activation: relu
+    use_batchnorm: true
+  bottleneck:
+    latent_dim: 64
+  head_hidden: 128
+  head_context_convs: 2
+  mem_slots: 500
+  shrink_threshold: 0.002
+
+# --- Loss (Q4) --- identical to udma_nightsplit.yaml
+loss:
+  lambda1: 1.0
+  lambda2: 1.0
+  lambda3: 1.0
+  entropy_weight: 2.0e-4
+
+# --- Scoring (Q5) --- identical to udma_nightsplit.yaml
+scoring:
+  weights: [0.5, 0.5, 0.5]
+  topk_frac: 0.01

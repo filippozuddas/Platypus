@@ -50,6 +50,7 @@ from torch import nn
 
 from .encoder import build_encoder
 from .memory import MemoryUnit
+from .observation_fold import fold_observations, unfold_rows
 from .vit_mae import ViTMAE, build_vit_mae
 
 __all__ = ["TeacherViT", "TeacherCNN", "FeatureStudent", "UDMA", "build_udma"]
@@ -152,6 +153,13 @@ class TeacherCNN(_FrozenTokenTeacher):
     parametrisation as the UDMA students (``docs/02_udma-architecture.md §11D8) — its own ``latent_dim``-channel 1x1 projection already lands on the
     target channel count, no separate head needed.
 
+    ``per_observation=True`` builds the trunk for one observation
+    (``tchans // n_obs`` rows) and applies it to each observation on its own,
+    so no grid row depends on another observation's pixels (the property the
+    ON/OFF filters downstream need; see docs/03_teacher-localization.md §4.2).
+    The grid is unchanged: ``n_obs`` rows of ``(tchans // n_obs) / 2**n_blocks``
+    each, i.e. (6, 64) for a (96, 1024) input with 4 blocks.
+
     Trained once by ``scripts/distill_teacher.py`` (frozen P, MSE on a
     (6,64) grid via a distillation-only 1x1 projection D, discarded after
     training) then loaded here as a fixed teacher — same
@@ -170,10 +178,26 @@ class TeacherCNN(_FrozenTokenTeacher):
         activation: str = "relu",
         use_batchnorm: bool = True,
         convs_per_block: int = 2,
+        per_observation: bool = False,
+        n_obs: int = 6,
     ):
         super().__init__()
+        n_blocks = len(filters)
+        factor = 2 ** n_blocks
+        th, fw, c = input_shape
+        self.per_observation = per_observation
+        self.n_obs = n_obs
+        if per_observation:
+            if th % n_obs or (th // n_obs) % factor:
+                raise ValueError(
+                    f"per_observation teacher: tchans {th} must split into {n_obs} "
+                    f"observations of a multiple of {factor} rows (2 ** {n_blocks} blocks)."
+                )
+            trunk_shape = (th // n_obs, fw, c)
+        else:
+            trunk_shape = input_shape
         self.trunk = build_encoder(
-            input_shape=input_shape,
+            input_shape=trunk_shape,
             filters=filters,
             latent_dim=latent_dim,
             kernel_size=kernel_size,
@@ -185,9 +209,6 @@ class TeacherCNN(_FrozenTokenTeacher):
         for p in self.trunk.parameters():
             p.requires_grad_(False)
 
-        n_blocks = len(filters)
-        factor = 2 ** n_blocks
-        th, fw, _ = input_shape
         self.grid_size = (th // factor, fw // factor)
         self.channels = latent_dim
         self.register_buffer("mu", torch.zeros(self.channels))
@@ -201,6 +222,8 @@ class TeacherCNN(_FrozenTokenTeacher):
 
     def _raw_tokens(self, x: torch.Tensor) -> torch.Tensor:
         """``(B,C,H,W) -> (B, channels, nh, nw)``, before Norm."""
+        if self.per_observation:
+            return unfold_rows(self.trunk(fold_observations(x, self.n_obs)), self.n_obs)
         return self.trunk(x)
 
 
@@ -432,7 +455,8 @@ def _load_teacher_cnn(teacher_cfg: Dict, input_shape: Tuple[int, int, int]) -> T
     shapes). ``kernel_size``/``activation``/``use_batchnorm`` fall back to
     :class:`TeacherCNN`'s own defaults only for checkpoints saved before
     2026-07-16 (when those keys were added) — their true value was always
-    that default.
+    that default; ``per_observation``/``n_obs`` likewise for checkpoints saved
+    before 2026-11 (always a whole-frame trunk).
     """
     checkpoint_path = _ROOT / teacher_cfg["checkpoint"]
     ckpt = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
@@ -451,6 +475,8 @@ def _load_teacher_cnn(teacher_cfg: Dict, input_shape: Tuple[int, int, int]) -> T
         activation=ckpt.get("activation", "relu"),
         use_batchnorm=bool(ckpt.get("use_batchnorm", True)),
         convs_per_block=int(ckpt["convs_per_block"]),
+        per_observation=bool(ckpt.get("per_observation", False)),
+        n_obs=int(ckpt.get("n_obs", 6)),
     )
     teacher.trunk.load_state_dict(ckpt["trunk_state_dict"])
     return teacher
