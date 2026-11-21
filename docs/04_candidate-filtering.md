@@ -1,8 +1,14 @@
 # Candidate filtering — thresholds, ON/OFF logic, and short-list rules
 
-Rationale behind `src/search/candidates.py`. The code there carries API
-documentation only; the reasoning, the hand-validated numbers, and the
-explicitly rejected alternatives live here.
+Rationale behind `src/search/candidates.py` and the selection rules in
+`src/search/pipeline.py`. The code there carries API documentation only; the
+reasoning, the hand-validated numbers, and the explicitly rejected alternatives
+live here.
+
+**Which rule is current.** The stages are bundled in named rules
+(`RULES` in `src/search/pipeline.py`, chosen with `--rule`). `production` is the
+rule of the July–October runs and is what §3–§6 describe. **`hybrid_v4` is the
+current rule**: §3.2 and §5.1 record what each `hybrid_*` step changed and why.
 
 **Related:** [`01_scoring-history.md`](01_scoring-history.md) ·
 [`03_teacher-localization.md`](03_teacher-localization.md) ·
@@ -85,6 +91,49 @@ Relatedly, `off_ceiling_probe` defaults to 300, tuned on the narrowband Voyager
 file. On real full-band Exotica cadences that is only ~0.2% coverage — scale it
 to ~2000–3000 for production runs.
 
+### 3.2 The quota under the hybrid rules (`hybrid_v1`–`hybrid_v3`)
+
+Added 2026-10/11 after injection-recovery through the full chain on the
+development nights. The 1% quota of the `production` rule (`far_quantile=0.99`)
+is relative to each cadence, so a row whose RFI fills the budget hides a genuine
+signal that the model scores highly. With three ON observations lit and SNR 30,
+rows that RFI saturates kept 31% of injected signals in the short list against
+87% for the others, and some rows kept none at any SNR.
+
+Alternatives were screened offline, at the same total load (1% of the
+development windows), on the saved window scores before anything was run:
+
+- an absolute global threshold, and the raw difference with the other targets of
+  the night: both fail, because a few noisy rows take the whole budget;
+- `min(far_thresh, off_ceiling)` (the variant of
+  [`06_threshold-audit.md`](06_threshold-audit.md)): detection recovers on
+  saturated rows, but on them a median of 12.5% of windows clear the threshold
+  instead of 1% (about five times the load over all development rows), and 14.9%
+  of control injection sites with nothing injected already clear it there;
+- a **local threshold**: a window also forms a candidate when it exceeds the
+  median of its 256 neighbours on each side by `cfar_k` robust sigmas
+  (`local_stats`), so RFI elsewhere in the band does not hide it;
+- **quota plus local threshold**: the best trade-off, and the one adopted.
+
+The rules, each a `SelectionRule` (`src/search/pipeline.py`):
+
+| Rule | Change | Why |
+|---|---|---|
+| `production` | 1% quota, `leak_frac=0.3`, leak reference = the weakest ON row | The July–October rule. |
+| `hybrid_v1` | Quota 0.5% **or** local excess > `cfar_k` = 6.7926 robust sigmas; leak reference = the weakest ON row *that holds the signal* | `cfar_k` is set on the development scan so the total share of windows forming candidates stays 1%. The old reference made a two-ON signal compare its OFF rows with the empty ON row, so the leak gate became "any OFF above threshold" (leak 21% against 7% for three ON). |
+| `hybrid_v2` | `hybrid_v1` outside the receiver notches (L 1200–1341.2 MHz, S 2300–2360 MHz) | The notches pass satellite-navigation transmissions (GPS, GLONASS, Galileo) that filled the list on bright-RFI rows. Excluded windows form no candidates and are left out of the cadence statistics, quota and OFF-noise probe. |
+| `hybrid_v3` | `leak_frac` 0.3 → 0.5 | Chosen on the saved map-row peaks of the development injections: more injected signals kept for about 5% more background candidates. |
+| `hybrid_v4` | One-OFF gate and cross-target veto (§5.1) | Targets the false positives that remained. |
+
+`hybrid_v2` to `hybrid_v4` change no window scores, so clusters, anomaly maps
+and thresholds are shared and a verdict can be re-decided from the saved maps
+(`VERDICT_FIELDS`, `scripts/cross_target_veto.py`).
+
+The local threshold does not fix everything: it adds candidates in rows where
+RFI is dense but locally structured (GPS L5 near 1.2 GHz, satellite downlinks in
+C band), concentrated in a few rows. Excluding dense-RFI regions beyond the receiver
+notches was considered and deferred.
+
 ## 4. `on_off_contrast` — ranking diagnostic
 
 Reports mean-ON / mean-OFF for one snippet. Two design points:
@@ -154,6 +203,13 @@ observed the same night on the same compute node.
   the scan and cuts the reviewed PDF from the scan's one. The share it removes
   depends on how many targets a night has on each node.
 
+On the development scan the one-OFF gate takes the short list from 9393 to
+5334 candidates and the veto to 4416 (918 of them removed by the veto), at a
+cost of about one point of injected three-ON signals; the veto's cost on
+injections is 0% on nights where a node has at most one other target and rises
+to 1–3% on a night with ten. These choices were made on the same
+development data they are scored on, so the gain is an optimistic one.
+
 Rejected at the same time: a margin on the weakest lit ON row (e.g. 1.3×
 `threshold`). It removes most noise maps, but a weak genuine signal produces the
 same barely-above-threshold rows, and the margin halved the recovery of
@@ -178,7 +234,7 @@ narrowband-only turboSETI. The trade was: a handful of visually-obvious noise
 blips (cheap for a human reviewer to dismiss) in exchange for **silent false
 negatives on the exact signals being searched for**. Not worth it.
 
-## 6. Where the short list actually loses candidates
+## 6. Where the short list actually loses candidates (`production` rule)
 
 Measured 2026-07-21 over 280k heldout candidates: **73% die at the `off_ceiling`
 gate before the ON/OFF logic engages at all.** The accepted short list has a

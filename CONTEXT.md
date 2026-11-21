@@ -49,6 +49,8 @@ _Avoid_: reconstruction error, loss, anomaly value
 Whether a model's anomaly response stays confined to the ON observations when
 only the ON observations contain signal. Measured as a ratio of ON to OFF
 response; a domain-matched teacher reaches ~35, a generic out-of-domain one ~2.
+The generic value is set by receptive-field geometry, not by what the features
+encode (`docs/03`, §4.2).
 _Avoid_: localization, ON/OFF localization, cadence localization
 
 **Map resolution**:
@@ -76,3 +78,32 @@ _Avoid_: recall, detection rate, sensitivity
 Whether the anomaly score separates signal from background, independently of any
 downstream filtering. A property of the model.
 _Avoid_: recovery, completeness
+
+**Candidate**:
+One cluster of adjacent frequency windows whose score clears the first cut,
+represented by its peak window.
+_Avoid_: detection, hit, event
+
+**Selection rule**:
+A named bundle of the candidate-selection stages and short-list gates, chosen
+with `--rule` (`RULES` in `src/search/pipeline.py`). The current one is
+`hybrid_v4`.
+_Avoid_: threshold, filter, cut
+
+**Short list**:
+The candidates that pass the ON/OFF gates of the selection rule and, after the
+veto, go to the reviewed PDF. The full candidate table is larger and is kept.
+_Avoid_: final list, candidates (when the filtered set is meant)
+
+**Cross-target veto**:
+Dropping a candidate that overlaps clusters of at least two other targets of the
+same observing night and compute node: a signal from one direction on the sky
+cannot be at the same channels toward other targets. Applied after the night is
+scanned.
+_Avoid_: RFI filter, deduplication
+
+**BL band / extended band**:
+The BL band is the receiver's published range (receiver notches excluded) used
+for the main completeness figure; the extended band is the rest of the recorded
+band, which is searched and labelled but reported separately.
+_Avoid_: usable band, clean band

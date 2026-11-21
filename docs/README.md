@@ -10,19 +10,20 @@ no dated correspondence and no superseded material in this directory.
 
 | # | Document | Answers |
 |---|---|---|
-| 01 | [Scoring history](01_scoring-history.md) | Why does this project not just use reconstruction error? |
+| 01 | [Scoring history](01_scoring-history.md) | Why does this project not just use reconstruction error, and what became of the earlier backbones? |
 | 02 | [UDMA architecture](02_udma-architecture.md) | What is the production model, and how does it relate to the paper it adapts? |
 | 03 | [Teacher localization](03_teacher-localization.md) | Why is the teacher radio-trained instead of paper-faithful, and is that still needed? |
-| 04 | [Candidate filtering](04_candidate-filtering.md) | How does a scored snippet become a candidate a human looks at? |
+| 04 | [Candidate filtering](04_candidate-filtering.md) | How does a scored snippet become a candidate a human looks at, and which selection rule is current? |
 | 05 | [Results and limitations](05_results.md) | Does it work, and what is still broken? |
-| 06 | [Threshold audit](06_threshold-audit.md) | Is the pipeline actually searching everything it scans? |
+| 06 | [Threshold audit](06_threshold-audit.md) | Is the pipeline actually searching everything it scans? (July audit; its remedy was superseded, see its update note) |
 
 **If you only read one:** [`01_scoring-history.md`](01_scoring-history.md). Five
 scorer families failed before the current one worked, and that history explains
 almost every design choice in `src/`.
 
-**If you want the honest status:** [`05_results.md`](05_results.md) §6, which
-lists known limitations rather than resolved ones.
+**If you want the honest status:** [`05_results.md`](05_results.md) §8, which
+lists known limitations rather than resolved ones; §7 has the current chain's
+results.
 
 ## Conventions
 

@@ -8,6 +8,16 @@ Why a third of the search was never actually searched, and what it costs to fix.
 **Status:** findings 1 and 2 measured on 150/364 cadences, finding 3 on all 364.
 Percentages will move; the mechanisms will not.
 
+> **Update (2026-11).** The audit's remedy, `min(far_thresh, off_ceiling)`, was
+> not adopted. Measured on the development scan of the night-split model it let a
+> median 12.5% of windows through on saturated rows instead of 1%. The quota was
+> replaced instead by a hybrid rule (a 0.5% quota plus a local threshold,
+> `hybrid_v1`–`hybrid_v4`, [`04_candidate-filtering.md`](04_candidate-filtering.md)
+> §3.2), which lifts the completeness of saturated rows from 31% to about 71% at
+> SNR 30 without that load. The development scan reproduced the audit's
+> mechanism: the quota sat above the OFF ceiling on 101 of 299 rows (34%), against
+> 32.7% here. Everything below describes the `production` rule and the July model.
+
 ---
 
 ## 1. The two cuts

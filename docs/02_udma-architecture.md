@@ -7,7 +7,9 @@ Journal 11(24):39361) to GBT `0000.h5` cadences.
 Read [`01_scoring-history.md`](01_scoring-history.md) first — it explains why a
 feature-space disagreement scorer was necessary at all.
 
-**Implementation:** `src/models/udma.py`, `configs/model/udma.yaml`
+**Implementation:** `src/models/udma.py`; reference config
+`configs/model/udma_nightsplit.yaml` (the one-variable variants `udma_*.yaml`
+change the teacher, the memory size or the bottleneck)
 **Results against the bars defined here:** [`05_results.md`](05_results.md)
 
 ---
@@ -187,11 +189,25 @@ lives in the downstream stage
 
 ## 8. Training configuration
 
-- Same 1M+ memmap dataset, 56/9/28 per-cadence split, online preprocessing.
-- AdamW + cosine annealing, lr 1e-3, batch 256, bf16-mixed.
-- Early stopping on `val_st1 + val_st2`.
-- Teacher frozen in `eval()` inside the step.
-- Cost dominated by the teacher forward — hours, not days, on 1–2× RTX 4090.
+Reference run (`configs/training/udma_gbt_fine_nightsplit.yaml`):
+
+- **Data.** A night-disjoint format-2 snippet cache: 263 training rows × 2200
+  snippets (578,600) and a validation sample from the development/calibration
+  nights, 299 rows × 300 snippets (89,700). The final-reserve nights are not
+  read. Preprocessing is online and per observation.
+- **Optimisation.** AdamW (weight decay 0.01), lr 1e-3, batch 256, 60 epochs,
+  bf16-mixed on two GPUs. Early stopping on `val_st_sum` (`st1 + st2`), not on
+  `val_loss`, which also contains the `ss` and entropy terms a degenerate
+  student pair could game. The checkpoint is chosen from `val_loss`.
+- **Teacher.** Frozen, in `eval()` inside the step; its normalization
+  statistics are refitted on the training nights only
+  (`scripts/fit_udma_teacher_norm.py`).
+- **Cost.** About six hours for the reference run; the teacher forward dominates.
+
+The earlier run behind the acceptance bars below used a larger, randomly split
+snippet set (about 560k snippets, 56/9/28 per-cadence split). That split was by
+cadence, so cadences of one observing night fell on both sides of it, which
+is why the night split replaced it.
 
 ## 9. Pre-registered acceptance bars
 
@@ -211,7 +227,9 @@ against the pixel-space probe on the same seeds and splits.
 keep the pixel-space probe as the scorer. Tuning budget was capped at 2
 iterations deliberately — no fishing.
 
-All five bars passed; see [`05_results.md`](05_results.md).
+All five bars were passed by that earlier model; see [`05_results.md`](05_results.md).
+This repository records no re-run of the matched-energy bars on the night-split
+reference, which has been checked instead through the injection-recovery chain.
 
 ## 10. Risks accepted at design time
 

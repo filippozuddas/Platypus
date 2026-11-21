@@ -133,3 +133,36 @@ real-patch galleries instead (`scripts/debug/visualize_memae_memory.py`).
   as a training objective); the full ban resumes when `0001.fil` work restarts.
 - **Solve `0000.fil` first.** Pivoting to `0001.fil` is not an escape hatch from
   a `0000.fil` plateau.
+
+## 8. The retired backbones
+
+Everything in §2 and §3 was built as a selectable backbone before UDMA existed,
+and the code and configs are still in the tree. They are kept as baselines and
+as parts of UDMA, not as search models; `build_autoencoder()`
+(`src/models/autoencoder.py`) still dispatches to all of them.
+
+| Backbone | Config | Code | What it is | Status |
+|---|---|---|---|---|
+| **Autoencoder** | `convae.yaml` | `Autoencoder` | Deterministic CNN encoder–decoder (4 blocks, filters 32→256, 16× spatial reduction, spatial bottleneck); score is the full reconstruction error. Modelled on the CNN backbone of Ma et al., without ContrastiveVAE, Random Forest or cadence labels. | Retired as a scorer (§2: copies the injected line). Its encoder trunk is the students' trunk in UDMA. |
+| **CNN-MAE** | `convae_mae.yaml` | `MAE` | The same stack with ~75% of the patches zeroed in training and the loss on the masked positions only, against the "too-good reconstruction" failure of a plain AE. | Retired (§2: collapses to an energy detector). |
+| **VAE** | `convae_vae.yaml` | `VAE` | The same stack with a variational bottleneck: reconstruction plus `beta`·KL. A single `variational` flag, kept as a fair-comparison variant. | Never the deciding comparison: no result is recorded in this repository. |
+| **MemAE** | `memae.yaml` | `MemoryUnit` in `src/models/memory.py` | CNN AE with a content-addressable memory of normal prototypes (Gong et al. 2019) between encoder and decoder. | Retired as a scorer (§2: R² AUC 0.648, narrowly above trivial statistics). The memory unit is student B of UDMA. |
+| **ViT-MAE** | `vit_mae.yaml`, plus `vit_mae_ssim.yaml` and `vit_dae.yaml` (denoising variant) | `src/models/vit_mae.py` | SSAST-style Vision Transformer masked autoencoder: patch tokens, Transformer encoder, partitioned reconstruction at inference. | Retired as a scorer (§2). Its encoder is the frozen UDMA teacher. |
+
+Two points that are easy to lose:
+
+- **The backbones were not compared on a common architecture.** An early goal
+  was parity across backbones (one conv stack, one flag each). It was dropped:
+  each backbone could be tuned on its own and the best one on the
+  injection-recovery test would win. For the scorer families in §2 the question
+  was closed by the mechanism, not by tuning.
+- **AE versus VAE is orthogonal to faithfulness to Ma et al.** What the
+  project drops from that work is the supervised classifier and the cadence
+  labels, which bind the search to known signal classes; the encoder–decoder
+  backbone is kept. The goal of searching a *broader range* of signals is the
+  reason the scorer is unsupervised, not a reason to use their VAE.
+
+Training configs for the retired backbones are `configs/training/{default,
+memae_gbt_fine,bvae_gbt_fine,dae_gbt_fine,srt_real}.yaml`. They point at
+`configs/data/gbt_fine.yaml` (the pre-night-split layout) and are not expected
+to reproduce on the current manifests.

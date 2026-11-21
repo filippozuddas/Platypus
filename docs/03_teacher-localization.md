@@ -11,11 +11,14 @@ overturned their main conclusion (§4.2).
 > reproduced by an untrained network. A ResNet-18 applied to each observation
 > separately passes every teacher gate. Whether a teacher distilled from it gives
 > a usable search chain (localization and detection after student training) is
-> **not yet measured**. The production teacher is unchanged.
+> **not yet measured**. The production teacher is unchanged. (2026-11-21: the
+> code for that distillation, `scripts/distill_teacher.py --per_observation` and
+> `configs/model/udma_cnn_obs.yaml`, is written and tested; the first
+> training attempts ran out of GPU memory and none has completed yet.)
 
 Rationale behind `scripts/debug/teacher_row_leakage_test.py`,
-`scripts/debug/teacher_sensitivity_test.py`, and the teacher block of
-`configs/model/udma.yaml`.
+`scripts/debug/teacher_sensitivity_test.py`, and the teacher block of the UDMA
+model configs (`configs/model/udma_nightsplit.yaml`, `udma_cnn_obs.yaml`).
 
 **Related:** [`02_udma-architecture.md`](02_udma-architecture.md) §11 ·
 [`04_candidate-filtering.md`](04_candidate-filtering.md)

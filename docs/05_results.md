@@ -3,19 +3,25 @@
 Validation results for the production UDMA scorer, and an honest list of what is
 known to be wrong or unverified.
 
-**Last updated:** 2026-10-06 (historical results clarified; no new experiment)
+**Last updated:** 2026-11-21
 **Model:** [`02_udma-architecture.md`](02_udma-architecture.md) ·
 **Bars:** §9 of that document, pre-registered before any run
 
 ---
 
-**Provenance matters.** This page combines historical experiments, not one
-homogeneous benchmark. Sections 1 and the main table in 3 describe SRT work;
-the later per-cadence numbers in 3 concern GBT with the historical preprocessing.
-Sections 5–6 concern GBT `6d0d1ba/epoch=057` evaluated with `per_obs`.
-Exact resolved configs and hparams still need archiving before reproduction.
-The Tier A manifest contains one sequence on one night; Tier B contains seven
-sequences on two nights. Neither is broad independent validation.
+**Provenance matters.** This page combines experiments on two generations of
+the model, not one homogeneous benchmark.
+
+- **Earlier model (July 2026), §§1–6.** Sections 1 and the main table in 3
+  describe SRT work; the later per-cadence numbers in 3 concern GBT with the
+  historical preprocessing. Sections 5–6 concern GBT `6d0d1ba/epoch=057`
+  evaluated with `per_obs`. Its split was by cadence, not by night. The Tier A
+  manifest contains one sequence on one night; Tier B contains seven sequences
+  on two nights. Neither is broad independent validation.
+- **Night-split reference model (October–November 2026), §7.** Trained on
+  night-disjoint data and evaluated through the full search chain on the
+  development/calibration nights. **This is the current state**; read §7 first
+  for what the pipeline does today, then §8 for what is still wrong.
 
 ## 1. Acceptance bars — all passed
 
@@ -97,10 +103,12 @@ Two caveats that matter for interpretation:
 - Equal-weight fusion **dilutes `map_ss`**, which is by far the strongest single
   term at SNR 10. Weight tuning is an open, unexploited lever.
 
-## 5. Search on real data
+## 5. Search on real data (July heldout scan, `production` rule)
 
-A full inference pass over the Exotica `0000.h5` held-out set (364 cadences) has
-been run. Short-list behaviour on 280k held-out candidates:
+A full inference pass over the Exotica `0000.h5` held-out set (364 cadences) was
+run with the earlier model and the `production` rule; the held-out set of that
+split is not the final reserve of the night split (§8). The current chain's scan
+is in §7. Short-list behaviour on 280k held-out candidates:
 
 - **73% are rejected at the `off_ceiling` gate before the ON/OFF logic engages.**
   The gate, not the ON/OFF rules, is the binding constraint on the false-alarm
@@ -251,7 +259,112 @@ built and swept before being reversed on the mentor's instruction that a shape
 must be complete inside each ON observation — that one was a scoping decision
 rather than an error, but it cost a sweep too.
 
-## 7. Known limitations
+## 7. Night-split development results (current chain)
+
+Everything here is about the **reference model of the night split**
+([`02_udma-architecture.md`](02_udma-architecture.md) §8): a ViT-MAE teacher
+trained on SRT cadences, students trained for 60 epochs on 263 training rows,
+`val_st_sum` 1.69 → 0.548. It is evaluated on the **299 development/calibration
+rows** through the production search chain, never on the final reserve. The
+selection rules of [`04_candidate-filtering.md`](04_candidate-filtering.md) §3.2
+and §5.1 were chosen on these same rows, so the gain between rules is a
+development result and an optimistic one; the honest measurement is the final
+reserve, which has not been opened.
+
+### 7.1 Sanity checks
+
+- **Voyager-1.** The carrier is ranked first with a clean 3/3 short list; its
+  score is 32.9 (12.3 with the earlier model) and its ON/OFF contrast 39.6. One
+  cadence: a check, not a measurement.
+- **Reproducibility.** With deterministic GPU scoring, two runs on the same
+  cadence give identical scores and candidates bit for bit; the difference from
+  a TF32 run is at most 8·10⁻⁵ relative.
+
+### 7.2 Development scan
+
+All 299 rows were scanned without error. The cost is dominated by reading the
+raw files, not by the model: about 530 s of loading against 190 s of search per
+row.
+
+| Rule | Short list (usable band) | Per row | Note |
+|---|---|---|---|
+| `production` | 6277 | median 15 | 35 rows empty; 34% of rows have the 1% quota above the OFF ceiling, as in [`06_threshold-audit.md`](06_threshold-audit.md) |
+| `hybrid_v3` | 9393 | 31.4 mean, median 14 | 9 rows empty; the increase is entirely in the 101 saturated rows, and ten rows hold 81% of it (GPS L5, C-band satellite downlinks) |
+| `hybrid_v4` | **4416** | 14.8 mean | after the one-OFF gate (5334) and the cross-target veto |
+
+Failure anatomy of the `hybrid_v3` list (before `hybrid_v4`): in 34% of
+candidates the second lit ON observation is noise (a map row maximum over 64
+cells against a per-cell threshold), in 43% an OFF row is as strong as the
+weakest ON, and in 25% short blips fall in different ON observations at
+different frequencies. A margin on the weakest ON row would remove most noise
+maps but halves recovery at moderate SNR, so it was rejected.
+
+### 7.3 Injection-recovery through the chain
+
+Catalog: 62 development rows (8 per night, drawn from the seed, never from model
+scores), 25 sites per row, eight morphologies, SNR 0, 7, 10, 15, 20, 30, 50,
+100, ON patterns of three, two and one ON observations: 496,000 injections.
+SNR 0 is the same site with nothing injected (a paired control); the single-ON
+pattern is a control for how often map dispersion makes one lit ON look like
+two. Completeness is the share of injections that end in the reviewed list.
+
+**Three ON observations lit, BL receiver band, receiver notches excluded,**
+nights weighted by bandwidth, share of injections in the reviewed list (95%
+interval where computed):
+
+| SNR | `production` | `hybrid_v3` | `hybrid_v4` |
+|---|---|---|---|
+| 10 | 29.8 | 34.2 | 33.4 |
+| 15 | 56.5 (48–65) | 69.3 | 68.2 (64–73) |
+| 30 | 71.2 (62–80) | 88.1 | **87.4 (85–90)** |
+| 100 | 82.5 (77–88) | 93.4 | 92.7 (91–94) |
+
+By receiver at SNR 30 (`production` → `hybrid_v4`): L 47 → 77, S 55 → 89,
+C 76 → 89, X 86 → 92. The gain sits almost entirely in L and S, where RFI
+saturates the quota. Across morphologies at SNR 30 `hybrid_v4` runs from 75.8%
+(`wideband_continuous`) to 95.5% (`random_2d`).
+
+Controls and caveats:
+
+- **Single ON lit** (should be rejected): 1.9% in the list at SNR 30 and 2.7% at
+  SNR 100, against 0.00% at SNR 0 (nothing injected). A real, small leak of one-ON signals through
+  the map, not coincidence with the background.
+- **Two ON lit:** 87.1% at SNR 30 but 84.6% at SNR 100. Completeness *falls* with
+  SNR here, probably leakage into the OFF rows at high SNR; not yet explained.
+- **Outside the BL band** (the rest of the recorded band, which is searched and
+  labelled, not cut): 70.9% at SNR 30 (58–85), poorest in L (35%). 26% of the
+  `hybrid_v4` background candidates are in this part, which is 22% of the
+  searched MHz; the densest are at the edges of the L band, below 1.1 GHz and
+  above 1.9 GHz (15.1 candidates per 100 MHz against 6.2 inside).
+- **Veto cost on signals:** 0.4–0.7% of the injections `hybrid_v4` would
+  otherwise keep, near zero where a node has at most one other target that night.
+- **The unit is the cadence, not the injection.** The bootstrap standard error is
+  1.4 points at SNR 30; treating the 9936 injections as independent would give
+  0.37.
+- **Intervals answer "on these observations".** Two nights per receiver cannot
+  estimate night-to-night variability. Band totals of two nights of one receiver
+  differ by 2–7 points, but in sub-bands with RFI completeness changes by tens
+  of points between observations (one L sub-band: 79% and 0%; one S sub-band:
+  95% and 31%) while clean sub-bands do not move. The figures do not transfer to
+  other nights.
+- **The BL band edges for C and X are provisional** (L 1.10–1.90, S 1.80–2.80,
+  C 4.0–7.8, X 7.8–12.3 GHz, after Price et al. 2020); the headline figure does
+  not depend on the X edge (86.7% against 86.6% for 12.3 against 11.2 GHz).
+- **The reserve's total will not be comparable** with these: with the same
+  per-receiver rates, the reserve's receiver mix gives 88.5% against 86.7%, so
+  compare per receiver.
+- SNR is not commensurable across morphologies (§6).
+
+### 7.4 Human review load
+
+A pilot review of 476 candidates took about 0.7 s per candidate (0.6–1.4), with
+negligible fixed time per PDF: the 4416 candidates of `hybrid_v4` are about
+fifty minutes of looking, before any follow-up. The pilot found two candidates
+worth a closer look and a systematic false positive of the map-based filter: a
+narrow line present in all six observations in the data, whose map lights only
+where the line enters the window, so no OFF rule fires.
+
+## 8. Known limitations
 
 Listed because they are real, not because they are resolved.
 
@@ -260,7 +373,8 @@ Voyager scale (~2046 snippets per cadence, ~15% band coverage). At full-band
 Exotica scale (~1000 clusters per cadence) the multiple-comparisons burden is far
 higher and false positives reappear. Fixable post-hoc from the saved CSVs
 without re-running the scan. See
-[`04_candidate-filtering.md`](04_candidate-filtering.md) §3.1.
+[`04_candidate-filtering.md`](04_candidate-filtering.md) §3.1. The hybrid
+rules change the quota (§7), not this floor.
 
 **`off_ceiling_probe` default is mistuned for production.** The default of 300
 was set on the narrowband Voyager file; on full-band Exotica cadences it covers
@@ -270,7 +384,40 @@ only ~0.2% of the band. Production runs should use ~2000–3000.
 teacher detects better (93.3/98.4/100.0 at SNR 15/20/30 vs 80.9/94.7/99.8) but
 does not localize; the domain-matched teacher localizes but detects worse. There
 is currently no single checkpoint that wins both. See
-[`03_teacher-localization.md`](03_teacher-localization.md) §5.
+[`03_teacher-localization.md`](03_teacher-localization.md) §5. The July
+diagnosis (receptive field) was revised in November; a distilled teacher
+confined to one observation (`cnn_obs`) is the test of whether both can be had,
+and its training is in progress — there is no result for it yet.
+
+**The final reserve is unopened, so nothing here is a survey completeness
+estimate.** The selection rules, thresholds and weights were chosen on the
+development rows that also score them (§7). The reserve (343 rows, five nights)
+is the honest test, and its mix of receivers differs from the development one.
+
+**The reserve is untouched by the current chain, not by the project's history.**
+The July held-out scan, the morphology sweeps and the benchmarks of §3 ran on a
+cadence-level split of the earlier model, and some of the observations they used
+belong to nights that are now in the reserve. The night split fixes this for
+everything trained or tuned since; the earlier numbers should be read with it in
+mind.
+
+**The teacher was trained on SRT cadences.** The reference teacher is in the
+radio domain but not on this telescope. There is no comparison against a
+GBT-trained teacher under the night split, and the justification for the SRT
+teacher is still open.
+
+**Receiver band edges for C and X are provisional**, and 18–25% of the
+development band lies outside the nominal receiver ranges. That part is searched
+and labelled rather than cut, and holds about a quarter of the background
+candidates.
+
+**Completeness is a property of the observation in RFI-dense sub-bands** (§7.3),
+so per-band figures do not transfer to other nights, and a "new nights" interval
+cannot be estimated from two nights per receiver.
+
+**No baseline along the chain.** There is no comparison of this chain against a
+simple statistical baseline fed through the same clustering and ON/OFF rules, nor
+against turboSETI or the classifier of Ma et al.
 
 **One historical benchmark is unreproducible.** A control re-run with verified
 identical checkpoint, config, and code produced 80.9/94.7/99.8% where the
@@ -287,11 +434,24 @@ represent what was detected. The pipeline can flag arbitrary morphology and
 cannot report it, which matters for what a candidate table is allowed to claim,
 and would be the first thing a finer patch grid buys.
 
-## 8. Not yet addressed
+## 9. Not yet addressed
 
-- **`0001.h5` (broadband transients)** — the natural next extension of the
-  "broader morphology" goal in the project specification, once `0000.h5` is
-  consolidated. Generators and DM-sweep sizing exist; no model has been trained.
-- **`0002.h5` (wideband / modulated)** — frame geometry still to be determined.
-- **turboSETI cross-comparison** — the optional final comparison against
-  traditional narrowband SETI, and goal #5 of the project specification.
+- **Teacher comparison before the search is frozen.** The distilled CNN teacher
+  confined to one observation, a 10-slot and a 30-slot memory are the variants to
+  compare against the reference, with the adoption rule fixed beforehand (three-ON
+  completeness at SNR 15 and 30, and the background load). The geometry gates of
+  the confined teacher pass
+  ([`03_teacher-localization.md`](03_teacher-localization.md) §4.2); the chain
+  has not been measured.
+- **Freeze and final search.** The method, thresholds and review budget are not
+  frozen, and the reserve has not been searched. Injection into every reserve
+  row, with few sites per row, is the planned way to measure its completeness.
+- **`0001.h5` (broadband transients).** The files are inventoried and associated
+  with the night split; the frame is a single window of 2048 samples at full
+  resolution. Generators and DM-sweep sizing exist, with known discrepancies still
+  to fix; no model has been trained.
+- **`0002.h5` (wideband / modulated).** Inventoried and associated; frame geometry
+  and signal recurrence are still to be determined.
+- **turboSETI cross-comparison.** The optional final comparison against
+  traditional narrowband SETI, and goal #5 of the project specification; its
+  scope is not defined.
