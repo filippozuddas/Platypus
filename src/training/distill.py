@@ -30,6 +30,17 @@ from src.models.observation_fold import PerObservation
 __all__ = ["build_trainable_trunk", "distill_teacher"]
 
 
+def _cuda_memory(device) -> str:
+    """Live and peak CUDA memory for the log line (empty on CPU): a live value
+    that climbs from one log line to the next means something is retained
+    across steps."""
+    if torch.device(device).type != "cuda" or not torch.cuda.is_available():
+        return ""
+    gib = 2 ** 30
+    return (f"  cuda alloc={torch.cuda.memory_allocated(device) / gib:.2f} GiB"
+            f" peak={torch.cuda.max_memory_allocated(device) / gib:.2f} GiB")
+
+
 def build_trainable_trunk(
     input_shape: Tuple[int, int, int],
     filters,
@@ -148,7 +159,7 @@ def distill_teacher(
             if step % log_every_n_steps == 0:
                 elapsed = time.time() - t0
                 log_fn(f"  epoch {epoch} step {step}  loss={loss.item():.4f}  "
-                       f"({elapsed:.0f}s elapsed)")
+                       f"({elapsed:.0f}s elapsed){_cuda_memory(device)}")
             step += 1
 
         if not loss_tensors:
