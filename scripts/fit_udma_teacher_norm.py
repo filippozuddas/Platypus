@@ -31,6 +31,32 @@ from src.models.autoencoder import build_autoencoder
 from src.utils.config import load_config
 from src.utils.provenance import write_provenance
 
+# Stop rule for the cnn_obs cycle (phase 06a, approved 2026-11-21): the
+# teacher divides by sigma, so a channel far below the others would dominate
+# the students' loss and the anomaly map. The phase-04 teacher had sigma
+# 0.98-2.05, a max/min ratio of ~2.
+SIGMA_REL_FLOOR = 0.01
+
+
+def sigma_check(sigma: torch.Tensor, rel_floor: float = SIGMA_REL_FLOOR) -> tuple[bool, list[str]]:
+    """Per-channel sigma summary. ``ok`` is False when any channel has
+    sigma below ``rel_floor`` times the median; the stats are still saved,
+    the decision on the next step is the user's."""
+    s = sigma.detach().double().cpu().flatten()
+    median = s.median().item()
+    floor = rel_floor * median
+    low = (s < floor).nonzero().flatten().tolist()
+    lines = [
+        f"sigma per channel: min {s.min().item():.4g}  median {median:.4g}  max {s.max().item():.4g}"
+        f"  (max/min {s.max().item() / max(s.min().item(), 1e-30):.3g})",
+        f"channels below {rel_floor:g} x median ({floor:.4g}): {len(low)}/{s.numel()}"
+        + (f"  -> {low}" if low else ""),
+    ]
+    ok = not low
+    lines.append("SIGMA CHECK: PASS" if ok else
+                 "SIGMA CHECK: STOP - do not train the students; decide first")
+    return ok, lines
+
 
 def _parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -95,6 +121,8 @@ def main():
                      n_train_snippets=len(train_ds), max_batches=args.max_batches)
     print(f"Saved -> {args.out}")
     print(f"Add to configs/model/udma.yaml: teacher.norm_stats: {args.out}")
+    for line in sigma_check(model.teacher.sigma)[1]:
+        print(line)
 
 
 if __name__ == "__main__":

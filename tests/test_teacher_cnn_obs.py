@@ -233,3 +233,24 @@ def test_cnn_obs_config_differs_from_the_reference_only_in_the_teacher():
     a = load_config(ROOT / "configs/training/udma_gbt_fine_nightsplit.yaml")
     b = load_config(ROOT / "configs/training/udma_gbt_fine_cnn_obs.yaml")
     assert [k for k in a if a[k] != b[k]] == ["model"]
+
+
+# ---- sigma check on the teacher normalization (stop rule before the students) ----
+
+def test_sigma_check_passes_a_teacher_like_the_phase_04_reference():
+    from scripts.fit_udma_teacher_norm import sigma_check
+
+    ok, lines = sigma_check(torch.linspace(0.98, 2.05, 128))
+    assert ok and lines[-1] == "SIGMA CHECK: PASS"
+    assert "0/128" in lines[1]
+
+
+def test_sigma_check_stops_on_a_near_constant_channel():
+    from scripts.fit_udma_teacher_norm import sigma_check
+
+    sigma = torch.ones(128)
+    sigma[[5, 77]] = 0.009  # below 1/100 of the median
+    sigma[9] = 0.011        # just above, not flagged
+    ok, lines = sigma_check(sigma)
+    assert not ok and lines[-1].startswith("SIGMA CHECK: STOP")
+    assert "2/128" in lines[1] and "[5, 77]" in lines[1]
