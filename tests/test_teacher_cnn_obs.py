@@ -198,6 +198,40 @@ def test_distill_whole_frame_path_is_unchanged():
         assert T.eval()(torch.zeros(1, 1, H, W)).shape == (1, LATENT, N_OBS, W // 16)
 
 
+@pytest.mark.parametrize("per_observation", [False, True])
+def test_distill_does_not_retain_each_steps_loss_buffer(monkeypatch, per_observation):
+    """F.mse_loss's scalar mean keeps the whole (pred - target) buffer as its
+    storage, so keeping ``loss.detach()`` per step grew by 48 MiB a step at
+    batch 128 until CUDA ran out of memory (2026-11-21)."""
+    from torch.multiprocessing.reductions import StorageWeakRef
+
+    from src.training import distill
+
+    mse_loss = distill.F.mse_loss
+    storages = []
+
+    def recording_mse(*args, **kwargs):
+        loss = mse_loss(*args, **kwargs)
+        storages.append(StorageWeakRef(loss._typed_storage()))
+        return loss
+
+    monkeypatch.setattr(distill.F, "mse_loss", recording_mse)
+    batches = _loader(n_batches=5)
+
+    def checked_batches():
+        for x in batches:
+            # only the previous step's loss may still be alive
+            assert all(ref.expired() for ref in storages[:-1])
+            yield x
+
+    P = _ConfinedP()
+    _, losses = distill_teacher(P, checked_batches(), INPUT_SHAPE, "cpu", filters=FILTERS,
+                                latent_dim=LATENT, p_channels=P.channels, epochs=1,
+                                log_every_n_steps=1000, log_fn=lambda _: None,
+                                per_observation=per_observation)
+    assert len(losses) == 5
+
+
 # ---- the UDMA model built on it ----
 
 def test_build_udma_with_a_per_observation_teacher(tmp_path):

@@ -155,7 +155,9 @@ def distill_teacher(
             loss.backward()
             optimizer.step()
 
-            loss_tensors.append(loss.detach())
+            # clone: the scalar from F.mse_loss keeps the whole (pred - target)
+            # buffer as storage (48 MiB at batch 128), and detach() shares it.
+            loss_tensors.append(loss.detach().clone())
             if step % log_every_n_steps == 0:
                 elapsed = time.time() - t0
                 log_fn(f"  epoch {epoch} step {step}  loss={loss.item():.4f}  "
