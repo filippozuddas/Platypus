@@ -20,6 +20,18 @@ OFF-row motion is pure receptive-field leakage.
                         vs. training target
     convnextv2_fcmae    ImageNet domain, reconstruction pretraining -- tests
                         objective vs. domain (needs ``pip install timm``)
+    udma_map            a trained UDMA model end to end: its teacher, both
+                        students and the four disagreement maps (st1, st2,
+                        ss, fused cob) -- tests whether the ANOMALY MAP leaks,
+                        which is what the ON/OFF short-list filter reads
+
+For ``udma_map`` the map stages are one scalar per cell, so the displacement
+is ``|m(x+s) - m(x)|``. They are also read on the level the short-list rule
+sees: each row's map maximum against the background, the 99th percentile of
+the OFF-row maxima of the clean frames (same stage, same model). With OFF
+pixels unchanged, an OFF row above that background is response the model
+generated from ON pixels. When the teacher is confined to one observation
+(``cnn_obs``) its OFF rows must not move at all: that is the instrument check.
 
 Cost: n_frames * len(snr_list) * len(stages) frozen forwards. No training.
 
@@ -58,6 +70,11 @@ Usage (run on the data host; --cache must point at a preprocessed cache):
 
     # ResNet-18 confined to one observation at a time
     python scripts/debug/teacher_row_leakage_test.py --confine obs --cache <cache_dir>
+
+    # a trained UDMA model: teacher, students and anomaly maps
+    python scripts/debug/teacher_row_leakage_test.py \
+        --architecture udma_map --checkpoint <udma.ckpt> \
+        --model_config configs/model/udma.yaml --cache <cache_dir>
 """
 
 import argparse
@@ -270,6 +287,22 @@ class ViTMAEStages(nn.Module):
         return tok.reshape(b, nh, nw, d).permute(0, 3, 1, 2)
 
 
+def load_udma(checkpoint, model_cfg, device, architecture: str) -> nn.Module:
+    """A UDMA model from a Lightning checkpoint, in eval mode on ``device``
+    (teacher weights included: they live in the checkpoint)."""
+    from src.models import build_autoencoder
+    model = build_autoencoder(INPUT_SHAPE, model_cfg, loss="mse")
+    ckpt = torch.load(str(checkpoint), map_location=device, weights_only=False)
+    state = {k.replace("model.", "", 1): v
+             for k, v in ckpt["state_dict"].items() if k.startswith("model.")}
+    model.load_state_dict(state)
+    model.eval().to(device)
+    if not hasattr(model, "student_ae"):
+        raise SystemExit(f"--architecture {architecture} requires a UDMA checkpoint "
+                         "(architecture: udma in --model_config).")
+    return model
+
+
 class UDMAStudentStages(nn.Module):
     """A trained UDMA student's own output feature grid, exposing the SAME
     ``features(x, stage) -> (B,C,nh,nw)`` interface as :class:`ResNetStages` /
@@ -289,16 +322,7 @@ class UDMAStudentStages(nn.Module):
 
     def __init__(self, checkpoint, model_cfg, device, student="ae"):
         super().__init__()
-        from src.models import build_autoencoder
-        model = build_autoencoder(INPUT_SHAPE, model_cfg, loss="mse")
-        ckpt = torch.load(str(checkpoint), map_location=device, weights_only=False)
-        state = {k.replace("model.", "", 1): v
-                 for k, v in ckpt["state_dict"].items() if k.startswith("model.")}
-        model.load_state_dict(state)
-        model.eval().to(device)
-        if not hasattr(model, "student_ae"):
-            raise SystemExit("--architecture udma_student requires a UDMA checkpoint "
-                             "(architecture: udma in --model_config).")
+        model = load_udma(checkpoint, model_cfg, device, "udma_student")
         self.model = model
         self.student = {"ae": model.student_ae, "mem": model.student_mem}[student]
         self.grid_size = model.teacher.grid_size
@@ -315,6 +339,85 @@ class UDMAStudentStages(nn.Module):
         if isinstance(out, tuple):  # memory student returns (out, attention)
             out = out[0]
         return out
+
+
+MAP_STAGES = ("st1", "st2", "ss", "cob")
+UDMA_MAP_STAGES = ("teacher", "student_ae", "student_mem") + MAP_STAGES
+
+
+class UDMAMapStages(nn.Module):
+    """A whole trained UDMA model behind the ``features(x, stage)`` interface,
+    one stage per piece of the anomaly map (phase 06a, 2026-11-23):
+
+    - ``teacher``: the normalized teacher tokens (the students' target);
+    - ``student_ae`` / ``student_mem``: each student's output grid;
+    - ``st1``, ``st2``, ``ss``, ``cob``: the disagreement maps of
+      ``UDMA.anomaly_map_components``, as ``(B, 1, nh, nw)``.
+
+    Reading them together says where an OFF-row response of the map comes
+    from: a teacher and a student that move together on an OFF row cancel in
+    ``(T - S)^2``; a confined teacher that stays still does not."""
+
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model.eval()
+        self.grid_size = model.teacher.grid_size
+        self.teacher_confined = bool(getattr(model.teacher, "per_observation", False))
+
+    @classmethod
+    def from_checkpoint(cls, checkpoint, model_cfg, device) -> "UDMAMapStages":
+        return cls(load_udma(checkpoint, model_cfg, device, "udma_map"))
+
+    def train(self, mode: bool = True) -> "UDMAMapStages":
+        return super().train(False)
+
+    @torch.no_grad()
+    def features(self, x: torch.Tensor, stage: str) -> torch.Tensor:
+        """(B,1,96,1024) -> (B,C,nh,nw); C = 1 for the map stages."""
+        m = self.model
+        if stage == "teacher":
+            return m.teacher(x)
+        if stage in ("student_ae", "student_mem"):
+            out = getattr(m, stage)(x)
+            return out[0] if isinstance(out, tuple) else out
+        if stage in MAP_STAGES:
+            return m.anomaly_map_components(x)[stage].unsqueeze(1)
+        raise ValueError(f"unknown stage {stage!r}")
+
+
+@torch.no_grad()
+def row_level(model, frames, stage, device, batch=32) -> np.ndarray:
+    """(N, nh): each row's maximum over the frequency axis of a map stage's own
+    value (not a displacement) -- the quantity ``full_row_hits`` compares with
+    the cadence threshold."""
+    rows = []
+    for i in range(0, len(frames), batch):
+        x = torch.from_numpy(frames[i:i + batch]).float().unsqueeze(1).to(device)
+        rows.append(model.features(x, stage)[:, 0].amax(dim=2).cpu().numpy())
+    return np.concatenate(rows)
+
+
+def map_background(clean_rows: np.ndarray, quantile: float = 0.99) -> float:
+    """Background level of a map stage: ``quantile`` of the OFF-row maxima of
+    the clean (uninjected) frames."""
+    _, off_mask = row_on_off_masks(clean_rows.shape[1])
+    return float(np.quantile(clean_rows[:, off_mask], quantile))
+
+
+def off_rows_above_background(inj_rows: np.ndarray, background: float) -> dict:
+    """Rows of the injected frames against the background.
+
+    ``row_level``: (nh,) mean over frames of row maximum / background.
+    ``share_off_ge2``: share of frames with at least two OFF rows above the
+    background (the shape of an ``off_leak`` hit; the background is a proxy
+    for the cadence ceiling, not the production threshold)."""
+    _, off_mask = row_on_off_masks(inj_rows.shape[1])
+    above = inj_rows[:, off_mask] > background
+    return {
+        "row_level": inj_rows.mean(axis=0) / background,
+        "share_off_ge2": float((above.sum(axis=1) >= 2).mean()),
+        "share_off_ge1": float(above.any(axis=1).mean()),
+    }
 
 
 def row_on_off_masks(nh: int) -> tuple:
@@ -389,7 +492,8 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--architecture",
-                   choices=["resnet18", "convnextv2_fcmae", "vit_mae", "udma_student"],
+                   choices=["resnet18", "convnextv2_fcmae", "vit_mae", "udma_student",
+                            "udma_map"],
                    default="resnet18",
                    help="resnet18: out-of-domain P, RF sweep across stem/layer1/2/3 (default). "
                         "convnextv2_fcmae: SAME domain+family as resnet18, but masked-"
@@ -398,9 +502,12 @@ def parse_args():
                         "vit_mae: domain-matched teacher, single stage at --layer (localizing "
                         "reference) — requires --checkpoint/--model_config. udma_student: a "
                         "trained UDMA student's own output grid — requires --checkpoint/"
-                        "--model_config (architecture: udma) and --student.")
+                        "--model_config (architecture: udma) and --student. udma_map: a "
+                        "trained UDMA model's teacher, students and anomaly maps — requires "
+                        "--checkpoint/--model_config (architecture: udma).")
     p.add_argument("--checkpoint", type=Path, default=None,
-                   help="Required for --architecture vit_mae/udma_student; ignored otherwise.")
+                   help="Required for --architecture vit_mae/udma_student/udma_map; ignored "
+                        "otherwise.")
     p.add_argument("--model_config", type=Path, default=ROOT / "configs/model/vit_mae.yaml",
                    help="Model config: vit_mae.yaml (patch_size -> token grid) for --architecture "
                         "vit_mae, or udma.yaml/udma_cnn_teacher.yaml for udma_student.")
@@ -467,6 +574,18 @@ def main():
         stages = [model.stage_name]
         rf_label = {model.stage_name: f"teacher={teacher_type}"}
         print(f"  Student output grid: {model.grid_size}")
+    elif args.architecture == "udma_map":
+        if args.checkpoint is None:
+            raise SystemExit("--checkpoint is required for --architecture udma_map.")
+        with open(args.model_config) as f:
+            model_cfg = yaml.safe_load(f)
+        teacher_type = model_cfg.get("teacher", {}).get("type", "vit_mae")
+        print(f"Loading UDMA model from {args.checkpoint} (teacher.type={teacher_type})")
+        model = UDMAMapStages.from_checkpoint(args.checkpoint, model_cfg, args.device)
+        stages = list(UDMA_MAP_STAGES)
+        rf_label = {s: ("map" if s in MAP_STAGES else "features") for s in stages}
+        print(f"  Grid: {model.grid_size}; teacher confined to one observation: "
+              f"{model.teacher_confined}")
     elif args.architecture == "convnextv2_fcmae":
         print("Loading ConvNeXt V2 (ImageNet, FCMAE self-supervised, frozen) — "
               "domain-vs-objective isolating control")
@@ -503,6 +622,11 @@ def main():
 
     results = {}  # (stage, snr) -> (on_mean, off_mean, ratio)
     profiles = {}  # (stage, snr) -> (nh,) mean response of each feature row
+    is_map = args.architecture == "udma_map"
+    map_stages = [s for s in stages if s in MAP_STAGES] if is_map else []
+    backgrounds = {s: map_background(row_level(model, f_quiet, s, args.device))
+                   for s in map_stages}
+    levels = {}  # (stage, snr) -> off_rows_above_background dict
     for snr in args.snr_list:
         f_inj = np.array([
             preprocess_raw(
@@ -518,6 +642,9 @@ def main():
             on_m, off_m = float(on_resp.mean()), float(off_resp.mean())
             ratio = on_m / (off_m + 1e-12)
             results[(stage, snr)] = (on_m, off_m, ratio)
+            if stage in map_stages:
+                levels[(stage, snr)] = off_rows_above_background(
+                    row_level(model, f_inj, stage, args.device), backgrounds[stage])
 
     # ---- report ----
     print(f"\n{'='*72}")
@@ -582,6 +709,35 @@ def main():
                   "  leakage path other than the receptive field (preprocessing, BatchNorm mode,\n"
                   "  the injector touching OFF frames). Find it before reading any ratio above.")
 
+    if is_map:
+        print(f"\n{'='*72}")
+        print("MAP ROWS AGAINST THE BACKGROUND  (row max / q99 of clean OFF-row maxima;")
+        print("OFF pixels are unchanged, so an OFF row above 1 is model-generated)")
+        print(f"{'='*72}")
+        for stage in map_stages:
+            print(f"\n  {stage}  (background {backgrounds[stage]:.4f})")
+            print(f"    {'SNR':>5s}  " + "  ".join(f"{'row ' + str(i):>7s}" for i in range(N_OBS))
+                  + f"  {'>=1 OFF':>8s}  {'>=2 OFF':>8s}")
+            for snr in args.snr_list:
+                lv = levels[(stage, snr)]
+                print(f"    {snr:5g}  " + "  ".join(f"{v:7.2f}" for v in lv["row_level"])
+                      + f"  {lv['share_off_ge1']:8.1%}  {lv['share_off_ge2']:8.1%}")
+        if model.teacher_confined:
+            print(f"\n{'='*72}")
+            print(f"INSTRUMENT CHECK  (confined teacher: OFF rows <= {args.zero_tol:g} x mean ON row)")
+            print(f"{'='*72}")
+            off_rows = np.flatnonzero(row_on_off_masks(model.grid_size[0])[1])
+            checks = [leak_criterion(profiles[("teacher", s)], off_rows, args.zero_tol)
+                      for s in args.snr_list]
+            criteria["teacher"] = checks
+            ok = all(c["passed"] for c in checks)
+            worst = max(c["max_clean_frac"] for c in checks)
+            print(f"  teacher: max OFF response {worst:.2e} x ON  [{'PASS' if ok else 'FAIL'}]")
+            if not ok:
+                print("\n  FAIL: an OFF row of a teacher confined to one observation moved. The\n"
+                      "  probe or the model has a path across observations other than the\n"
+                      "  students. Find it before reading the map rows above.")
+
     # Headline: ratio trend across stages at the highest SNR (clearest signal).
     ref_snr = max(args.snr_list)
     print(f"\n{'='*72}\nVERDICT (ratio trend @ SNR {ref_snr:g}, deepest->shallowest)\n{'='*72}")
@@ -604,6 +760,12 @@ def main():
               "  cnn_distilled-target student doesn't, that's a second, architecture-independent\n"
               "  confirmation the TARGET's domain (not the CNN trunk) is the lever — corroborates\n"
               "  the teacher-level finding without any new training.")
+    elif is_map:
+        print("\n  Read: run it on two checkpoints that differ only in the teacher and compare\n"
+              "  stage by stage. The students' OFF response is the leak each student makes;\n"
+              "  the teacher's is the leak its target makes. Where both move, st1/st2 can stay\n"
+              "  small on the OFF rows; where only the students move, st1/st2 carry the leak\n"
+              "  into the map. The background table is what the short-list filter would see.")
     elif args.architecture == "convnextv2_fcmae":
         print("\n  Read: this is the domain-vs-objective isolating control (2026-07-16) — SAME\n"
               "  domain (ImageNet) and family (CNN) as resnet18, but pretrained via masked-patch\n"
@@ -628,6 +790,8 @@ def main():
         out_tag = f"{out_tag}_{args.confine}"
     if args.architecture == "udma_student":
         out_tag = f"udma_student_{args.student}_{args.checkpoint.parents[1].name}"
+    if is_map:
+        out_tag = f"udma_map_{args.checkpoint.parents[1].name}"
     out_npz = args.out_dir / f"teacher_row_leakage_{out_tag}.npz"
     np.savez(
         out_npz,
@@ -647,7 +811,15 @@ def main():
         **{f"clean_off_rows_{s}": expected_clean_off_rows(s, args.confine)
            for s in stages if is_resnet},
         instrument_check=np.array([all(c["passed"] for c in criteria[s]) if s in criteria
-                                   else True for s in stages]) if is_resnet else np.array([]),
+                                   else True for s in stages]) if (is_resnet or is_map) else np.array([]),
+        teacher_confined=bool(is_map and model.teacher_confined),
+        **{f"map_background_{s}": backgrounds[s] for s in map_stages},
+        **{f"map_row_level_{s}": np.array([levels[(s, snr)]["row_level"] for snr in args.snr_list])
+           for s in map_stages},
+        **{f"map_share_off_ge2_{s}": np.array([levels[(s, snr)]["share_off_ge2"]
+                                               for snr in args.snr_list]) for s in map_stages},
+        **{f"map_share_off_ge1_{s}": np.array([levels[(s, snr)]["share_off_ge1"]
+                                               for snr in args.snr_list]) for s in map_stages},
     )
     print(f"\nSaved -> {out_npz}")
 
