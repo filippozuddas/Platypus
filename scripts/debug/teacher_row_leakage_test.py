@@ -356,13 +356,29 @@ class UDMAMapStages(nn.Module):
 
     Reading them together says where an OFF-row response of the map comes
     from: a teacher and a student that move together on an OFF row cancel in
-    ``(T - S)^2``; a confined teacher that stays still does not."""
+    ``(T - S)^2``; a confined teacher that stays still does not.
+
+    ``confined_stages`` lists the stages whose OFF rows cannot move under an
+    ON-only injection by construction: the teacher when it runs per
+    observation, each student when it does, and the four map stages when the
+    teacher and both students all do."""
 
     def __init__(self, model: nn.Module):
         super().__init__()
         self.model = model.eval()
         self.grid_size = model.teacher.grid_size
         self.teacher_confined = bool(getattr(model.teacher, "per_observation", False))
+        self.students_confined = all(bool(getattr(st, "per_observation", False))
+                                     for st in (model.student_ae, model.student_mem))
+
+    @property
+    def confined_stages(self) -> list:
+        out = ["teacher"] if self.teacher_confined else []
+        if self.students_confined:
+            out += ["student_ae", "student_mem"]
+            if self.teacher_confined:
+                out += list(MAP_STAGES)
+        return out
 
     @classmethod
     def from_checkpoint(cls, checkpoint, model_cfg, device) -> "UDMAMapStages":
@@ -584,8 +600,8 @@ def main():
         model = UDMAMapStages.from_checkpoint(args.checkpoint, model_cfg, args.device)
         stages = list(UDMA_MAP_STAGES)
         rf_label = {s: ("map" if s in MAP_STAGES else "features") for s in stages}
-        print(f"  Grid: {model.grid_size}; teacher confined to one observation: "
-              f"{model.teacher_confined}")
+        print(f"  Grid: {model.grid_size}; confined to one observation: teacher "
+              f"{model.teacher_confined}, students {model.students_confined}")
     elif args.architecture == "convnextv2_fcmae":
         print("Loading ConvNeXt V2 (ImageNet, FCMAE self-supervised, frozen) — "
               "domain-vs-objective isolating control")
@@ -722,21 +738,22 @@ def main():
                 lv = levels[(stage, snr)]
                 print(f"    {snr:5g}  " + "  ".join(f"{v:7.2f}" for v in lv["row_level"])
                       + f"  {lv['share_off_ge1']:8.1%}  {lv['share_off_ge2']:8.1%}")
-        if model.teacher_confined:
+        if model.confined_stages:
             print(f"\n{'='*72}")
-            print(f"INSTRUMENT CHECK  (confined teacher: OFF rows <= {args.zero_tol:g} x mean ON row)")
+            print(f"INSTRUMENT CHECK  (confined stages: OFF rows <= {args.zero_tol:g} x mean ON row)")
             print(f"{'='*72}")
             off_rows = np.flatnonzero(row_on_off_masks(model.grid_size[0])[1])
-            checks = [leak_criterion(profiles[("teacher", s)], off_rows, args.zero_tol)
-                      for s in args.snr_list]
-            criteria["teacher"] = checks
-            ok = all(c["passed"] for c in checks)
-            worst = max(c["max_clean_frac"] for c in checks)
-            print(f"  teacher: max OFF response {worst:.2e} x ON  [{'PASS' if ok else 'FAIL'}]")
-            if not ok:
-                print("\n  FAIL: an OFF row of a teacher confined to one observation moved. The\n"
-                      "  probe or the model has a path across observations other than the\n"
-                      "  students. Find it before reading the map rows above.")
+            for stage in model.confined_stages:
+                checks = [leak_criterion(profiles[(stage, s)], off_rows, args.zero_tol)
+                          for s in args.snr_list]
+                criteria[stage] = checks
+                ok = all(c["passed"] for c in checks)
+                worst = max(c["max_clean_frac"] for c in checks)
+                print(f"  {stage}: max OFF response {worst:.2e} x ON  [{'PASS' if ok else 'FAIL'}]")
+            if any(not all(c["passed"] for c in criteria[s]) for s in model.confined_stages):
+                print("\n  FAIL: an OFF row of a stage confined to one observation moved. The\n"
+                      "  probe or the model has a path across observations that the fold does\n"
+                      "  not close. Find it before reading the map rows above.")
 
     # Headline: ratio trend across stages at the highest SNR (clearest signal).
     ref_snr = max(args.snr_list)
@@ -813,6 +830,7 @@ def main():
         instrument_check=np.array([all(c["passed"] for c in criteria[s]) if s in criteria
                                    else True for s in stages]) if (is_resnet or is_map) else np.array([]),
         teacher_confined=bool(is_map and model.teacher_confined),
+        students_confined=bool(is_map and model.students_confined),
         **{f"map_background_{s}": backgrounds[s] for s in map_stages},
         **{f"map_row_level_{s}": np.array([levels[(s, snr)]["row_level"] for snr in args.snr_list])
            for s in map_stages},

@@ -1,0 +1,31 @@
+# UDMA training with the per-observation distilled CNN teacher AND
+# per-observation students ("cnn_obs_students_obs", phase 06a, 2026-11-26).
+# Identical to udma_gbt_fine_cnn_obs.yaml except for model:. The teacher files
+# (distillation checkpoint, norm stats) are the ones already written for
+# cnn_obs: no new distillation or norm fit.
+
+data: configs/data/gbt_fine_nightsplit.yaml
+model: configs/model/udma_cnn_obs_students_obs.yaml
+
+training:
+  batch_size: 256
+  epochs: 60
+  learning_rate: 1.0e-3
+  optimizer: adamw
+  weight_decay: 0.01
+  loss: mse            # unused by UDMA (its own compute_loss owns the objective); kept for schema parity
+  seed: 42
+
+  # Early stopping on S-T regression quality only (UDMA.compute_loss's
+  # "st_sum" = st1+st2, logged as val_st_sum) — NOT val_loss, which also
+  # contains the ss/entropy terms that a degenerate student pair could game.
+  patience: 8
+  min_delta: 1.0e-5
+  monitor: val_st_sum
+
+hardware:
+  num_gpus: 2
+  mixed_precision: true  # bf16-mixed, as the reference; the frozen CNN teacher's BatchNorm runs in eval mode
+  num_workers: 16
+
+output_dir: outputs/training

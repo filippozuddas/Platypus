@@ -248,6 +248,21 @@ class FeatureStudent(nn.Module):
     placement would put it before the memory, but that would also change the
     memory's query geometry from 384x64 to 8x32, confounding the two limiters
     the way the mem_slots=30 experiment already showed is unreadable.)
+
+    ``per_observation=True`` runs the whole student (trunk, memory, squeeze
+    and head) on each observation on its own: the input is folded into its
+    ``n_obs`` strips of ``tchans // n_obs`` rows, the student maps each strip
+    to its own grid rows, and only the final output is unfolded back into
+    observation order. Grid row k then depends on observation k only, in eval
+    mode (in train mode BatchNorm still couples the strips through the batch
+    statistics). Folding only the trunk would not be enough: the head's 3x3
+    context convs would mix neighbouring observation rows of the grid. The
+    memory attention ``att`` keeps the same ``(B * nh * nw, slots)`` row
+    order, so the entropy term is unchanged. A ``per_observation_n_obs``
+    buffer is registered only in this mode, so a strict ``load_state_dict``
+    fails when a checkpoint and a model config disagree on the mode, in
+    either direction, instead of silently loading the weights into the other
+    architecture (the conv weights have the same shapes in both).
     """
 
     def __init__(
@@ -267,8 +282,23 @@ class FeatureStudent(nn.Module):
         head_context_convs: int = 2,
         squeeze_shape: Optional[Tuple[int, int]] = None,
         squeeze_channels: Optional[int] = None,
+        per_observation: bool = False,
+        n_obs: int = 6,
     ):
         super().__init__()
+        self.per_observation = per_observation
+        self.n_obs = n_obs
+        if per_observation:
+            factor = 2 ** len(list(filters))
+            th = input_shape[0]
+            if th % n_obs or (th // n_obs) % factor:
+                raise ValueError(
+                    f"per_observation student: tchans {th} must split into {n_obs} "
+                    f"observations of a multiple of {factor} rows (2 ** {len(list(filters))} blocks)."
+                )
+            # every shape below (trunk, squeeze grid check) is the strip's
+            input_shape = (th // n_obs,) + tuple(input_shape[1:])
+            self.register_buffer("per_observation_n_obs", torch.tensor(n_obs))
         self.trunk = build_encoder(
             input_shape=input_shape,
             filters=filters,
@@ -310,6 +340,8 @@ class FeatureStudent(nn.Module):
         self.head = nn.Sequential(*head_layers)
 
     def forward(self, x: torch.Tensor):
+        if self.per_observation:
+            x = fold_observations(x, self.n_obs)
         z = self.trunk(x)
         att = None
         if self.memory is not None:
@@ -317,6 +349,8 @@ class FeatureStudent(nn.Module):
         if self.squeeze is not None:
             z = self.squeeze(z)
         out = self.head(z)
+        if self.per_observation:
+            out = unfold_rows(out, self.n_obs)
         return (out, att) if self.memory is not None else out
 
 
@@ -537,6 +571,11 @@ def build_udma(
     head_context_convs = int(student_cfg.get("head_context_convs", 2))
     mem_slots = int(student_cfg.get("mem_slots", 500))
     shrink_threshold = student_cfg.get("shrink_threshold", None)
+    # Students confined to one observation each (phase 06a, 2026-11-26): with
+    # a confined teacher too, no map row can depend on another observation.
+    students_per_obs = bool(student_cfg.get("per_observation", False))
+    n_obs = int(getattr(teacher, "n_obs", 6)) if getattr(teacher, "per_observation", False) \
+        else int(student_cfg.get("n_obs", 6))
 
     n_blocks = len(filters)
     factor = 2 ** n_blocks
@@ -545,6 +584,11 @@ def build_udma(
         raise ValueError(
             f"Input spatial dims {(th, fw)} must be divisible by {factor} "
             f"(2 ** {n_blocks} student downsampling blocks)."
+        )
+    if students_per_obs and (th % n_obs or (th // n_obs) % factor):
+        raise ValueError(
+            f"student.per_observation: tchans {th} must split into {n_obs} observations "
+            f"of a multiple of {factor} rows (2 ** {n_blocks} student downsampling blocks)."
         )
     student_grid = (th // factor, fw // factor)
     if student_grid != teacher.grid_size:
@@ -573,6 +617,8 @@ def build_udma(
             head_context_convs=head_context_convs,
             squeeze_shape=squeeze_shape,
             squeeze_channels=squeeze_channels,
+            per_observation=students_per_obs,
+            n_obs=n_obs,
         )
 
     student_ae = _make_student(memory=False)
